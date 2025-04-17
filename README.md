@@ -2,7 +2,7 @@
 
 `esp-csi-cli-rs` is a command-line interface (CLI) application that runs on top of the `esp-csi-rs` crate.  `esp-csi-cli-rs` provides a user friendly interface for configuring and collecting Wi-Fi Channel State Information (CSI) on ESP devices. It allows users to configure various parameters related to CSI data collection.
 
-In order to use this crate, you would need to build and flash the source code for your target device. Currently supported devices include:
+In order to use this crate, you would need to flash the source code for your target device. Currently supported devices include:
 
 - ESP32
 - ESP32-C3
