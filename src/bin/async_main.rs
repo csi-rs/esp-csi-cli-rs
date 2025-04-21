@@ -266,11 +266,11 @@ configurations if necessary."),
                         argument_name: "apssid",
                         help: Some("The SSID for the AP"),
                     },
-                    Parameter::NamedValue {
-                        parameter_name: "ap-password",
-                        argument_name: "appassword",
-                        help: Some("The password for the AP"),
-                    },
+                    // Parameter::NamedValue {
+                    //     parameter_name: "ap-password",
+                    //     argument_name: "appassword",
+                    //     help: Some("The password for the AP"),
+                    // },
                     Parameter::NamedValue {
                         parameter_name: "sta-ssid",
                         argument_name: "stassid",
@@ -296,7 +296,6 @@ Options:
   --max-connections=<NUMBER>               Set the maximum number of AP connections (default: 1).
   --hide-ssid                              Hide the SSID for the AP (default: visible).
   --ap-ssid=<SSID>                         Set the SSID for the AP (default: empty).
-  --ap-password=<PASSWORD>                 Set the password for the AP (default: empty).
   --sta-ssid=<SSID>                        Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                Set the password for the station (default: empty).
 
@@ -1031,7 +1030,8 @@ fn set_wifi<'a>(
     let max_connections = argument_finder(item, args, "max-connections");
     let hide_ssid = argument_finder(item, args, "hide-ssid");
     let ap_ssid = argument_finder(item, args, "ap-ssid");
-    let ap_password = argument_finder(item, args, "ap-password");
+    // Placeholder for AP password. Adding a password without a AuthMethod results in a config error.
+    // let ap_password = argument_finder(item, args, "ap-password");
     let sta_ssid = argument_finder(item, args, "sta-ssid");
     let sta_password = argument_finder(item, args, "sta-password");
 
@@ -1077,14 +1077,18 @@ fn set_wifi<'a>(
         Err(_) => (),
     }
     match hide_ssid {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .wifi_config
-                .ssid_hidden = true;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .wifi_config
+                        .ssid_hidden = true;
+                })
+            }
+        }
         Err(_) => (),
     }
     match ap_ssid {
@@ -1103,26 +1107,26 @@ fn set_wifi<'a>(
         }
         Err(_) => (),
     }
-    match ap_password {
-        Ok(str) => {
-            if let Some(s) = str {
-                let str_w_space = s.replace("_", " ");
-                // Convert the `mod_str` into a `heapless::String<32>`
-                let mut hpls_str_w_space = heapless::String::<64>::new();
-                hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
+    // match ap_password {
+    //     Ok(str) => {
+    //         if let Some(s) = str {
+    //             let str_w_space = s.replace("_", " ");
+    //             // Convert the `mod_str` into a `heapless::String<32>`
+    //             let mut hpls_str_w_space = heapless::String::<64>::new();
+    //             hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-                CSI_COLLECTOR.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .wifi_config
-                        .ap_password = hpls_str_w_space.try_into().unwrap();
-                });
-            }
-        }
-        Err(_) => (),
-    }
+    //             CSI_COLLECTOR.lock(|config| {
+    //                 config
+    //                     .borrow_mut()
+    //                     .as_mut()
+    //                     .unwrap()
+    //                     .wifi_config
+    //                     .ap_password = hpls_str_w_space.try_into().unwrap();
+    //             });
+    //         }
+    //     }
+    //     Err(_) => (),
+    // }
     match sta_ssid {
         Ok(str) => {
             if let Some(s) = str {
