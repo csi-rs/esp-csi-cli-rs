@@ -350,7 +350,6 @@ Description:
   - CSI data will be collected and printed to the console.
   - After the specified duration, the process will terminate automatically. Otherwise collection runs forever."),
         },
-
         &Item {
             item_type: ItemType::Callback {
                 function: show_config,
@@ -409,17 +408,14 @@ fn enter_root(
     interface: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
-    writeln!(
-        interface,
-        "
-    Welcome to the CSI Collection CLI utility!"
-    )
-    .unwrap();
-    writeln!(interface, "").unwrap();
-    writeln!(
-        interface,
-        "Available Commands:
-    set-traffic         Configure traffic-related parameters (e.g., type, interval).
+    interface
+        .write_str("Welcome to the CSI Collection CLI utility!")
+        .unwrap();
+    interface.write_str("\n").unwrap();
+    interface
+        .write_str(
+            "Available Commands:
+    set-traffic         Configure traffic-related parameters (e.g. type, interval).
     set-network         Configure network architecture settings.
     set-csi             Configure CSI feature flags (e.g., LLTF, HTLTF).
     set-wifi            Configure WiFi settings (e.g., mode, SSID visibility).
@@ -432,9 +428,10 @@ fn enter_root(
     help <command>
 
     Example:
-    help set-traffic"
-    )
-    .unwrap();
+    help set-traffic",
+        )
+        .unwrap();
+    // interface.flush().unwrap();
 }
 
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
@@ -454,7 +451,7 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate heap space
-    esp_alloc::heap_allocator!(72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     // Initalize Embassy
     let timg1 = TimerGroup::new(peripherals.TIMG1);
@@ -500,7 +497,7 @@ async fn main(spawner: Spawner) {
     };
 
     // Create a buffer to store CLI input
-    let mut clibuf = [0u8; 64];
+    let mut clibuf = [0u8; 128];
     // Instantiate Context placeholder
     let mut context = Context::default();
     // Instantiate CLI runner with root menu, buffer, and serial
@@ -527,7 +524,7 @@ async fn csi_collector(
     // Wait for first start signal to kick off collection activity
     let mut interval = START_SIGNAL.wait().await;
 
-    // // Obtain copy from CSI collector in global context
+    // Obtain copy from CSI collector in global context
     let mut collector =
         CSI_COLLECTOR.lock(|collector| (collector.borrow().as_ref().unwrap().clone()));
 
@@ -713,86 +710,117 @@ fn set_csi<'a>(
     let val_scale_cfg = argument_finder(item, args, "val-scale-cfg");
 
     match disable_csi {
-        Ok(_str) => {
-            CSI_COLLECTOR.lock(|config| config.borrow_mut().as_mut().unwrap().csi_config.enable = 0)
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR
+                    .lock(|config| config.borrow_mut().as_mut().unwrap().csi_config.enable = 0)
+            }
         }
         Err(_) => (),
     }
     match disable_csi_legacy {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_legacy = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_legacy = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_ht20 {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_ht20 = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_ht20 = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_ht40 {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_ht40 = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_ht40 = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_su {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_su = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_su = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_mu {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_mu = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_mu = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_dcm {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_dcm = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_dcm = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_csi_beamformed {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .acquire_csi_beamformed = 0;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .acquire_csi_beamformed = 0;
+                })
+            }
+        }
         Err(_) => (),
     }
     match csi_he_stbc {
@@ -936,47 +964,63 @@ fn set_csi<'a>(
     let disable_ltf_merge = argument_finder(item, args, "disable-ltf-merge");
 
     match disable_lltf {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .lltf_enabled = false;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .lltf_enabled = false;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_htltf {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .htltf_enabled = false;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .htltf_enabled = false;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_stbc_htltf {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .stbc_htltf2_enabled = false;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .stbc_htltf2_enabled = false;
+                })
+            }
+        }
         Err(_) => (),
     }
     match disable_ltf_merge {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .csi_config
-                .ltf_merge_enabled = false;
-        }),
+        Ok(str) => {
+            if str.is_some() {
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .csi_config
+                        .ltf_merge_enabled = false;
+                })
+            }
+        }
         Err(_) => (),
     }
 
