@@ -8,12 +8,10 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::Duration;
 use esp_backtrace as _;
 use esp_backtrace as _;
 use esp_csi_rs::{config::TrafficType, NetworkArchitechture};
 use esp_csi_rs::{CSICollector, WiFiMode};
-use esp_hal::peripherals;
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(feature = "esp32")]
 use esp_hal::uart::{Config, Uart};
@@ -21,6 +19,7 @@ use esp_hal::uart::{Config, Uart};
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Async;
 use esp_println::println;
+use esp_wifi::wifi::{Interfaces, WifiController};
 use esp_wifi::{init, EspWifiController};
 use menu::*;
 
@@ -28,7 +27,7 @@ extern crate alloc;
 
 static CSI_COLLECTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<CSICollector>>> =
     Mutex::new(RefCell::new(None));
-static START_SIGNAL: Signal<CriticalSectionRawMutex, u64> = Signal::new();
+static START_SIGNAL: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
 
 #[derive(Default)]
 struct Context {
@@ -266,11 +265,11 @@ configurations if necessary."),
                         argument_name: "apssid",
                         help: Some("The SSID for the AP"),
                     },
-                    // Parameter::NamedValue {
-                    //     parameter_name: "ap-password",
-                    //     argument_name: "appassword",
-                    //     help: Some("The password for the AP"),
-                    // },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-password",
+                        argument_name: "appassword",
+                        help: Some("The password for the AP"),
+                    },
                     Parameter::NamedValue {
                         parameter_name: "sta-ssid",
                         argument_name: "stassid",
@@ -280,6 +279,11 @@ configurations if necessary."),
                         parameter_name: "sta-password",
                         argument_name: "stapassword",
                         help: Some("The password for the station"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "set-channel",
+                        argument_name: "wifichannel",
+                        help: Some("Specify the channel"),
                     },
                 ],
             },
@@ -296,8 +300,10 @@ Options:
   --max-connections=<NUMBER>               Set the maximum number of AP connections (default: 1).
   --hide-ssid                              Hide the SSID for the AP (default: visible).
   --ap-ssid=<SSID>                         Set the SSID for the AP (default: empty).
+  --ap-password=<PASSWORD>                 Set the password for the AP (default: empty).
   --sta-ssid=<SSID>                        Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                Set the password for the station (default: empty).
+  --set-channel=<NUMBER>                   Set the channel (default: 1).
 
 Examples:
   set-wifi --mode=ap --max-connections=5 --hide-ssid
@@ -409,7 +415,7 @@ fn enter_root(
     _context: &mut Context,
 ) {
     interface
-        .write_str("Welcome to the CSI Collection CLI utility!")
+        .write_str("******* Welcome to the CSI Collection CLI utility! *******")
         .unwrap();
     interface.write_str("\n").unwrap();
     interface
@@ -468,6 +474,9 @@ async fn main(spawner: Spawner) {
         init(timer.timer0, rng, peripherals.RADIO_CLK).unwrap()
     );
 
+    // Instantiate WiFi controller and interfaces
+    let (controller, interfaces) = esp_wifi::wifi::new(&init, peripherals.WIFI).unwrap();
+
     // Create an instance for the CSI Collector
     let csi_config = CSICollector::new_with_defaults();
 
@@ -478,7 +487,7 @@ async fn main(spawner: Spawner) {
 
     // Spawn the CSI Collection Task
     spawner
-        .spawn(csi_collector(peripherals.WIFI, init, seed as u64, spawner))
+        .spawn(csi_collector(controller, interfaces, seed as u64, spawner))
         .unwrap();
 
     // Instantiate Serial Interface for CLI host communication
@@ -516,8 +525,8 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn csi_collector(
-    wifi: peripherals::WIFI,
-    wifi_hw: &'static EspWifiController<'static>,
+    controller: WifiController<'static>,
+    interface: Interfaces<'static>,
     seed: u64,
     spawner: Spawner,
 ) {
@@ -529,7 +538,7 @@ async fn csi_collector(
         CSI_COLLECTOR.lock(|collector| (collector.borrow().as_ref().unwrap().clone()));
 
     // Initalize CSI collector
-    match collector.init(wifi, wifi_hw, seed, &spawner) {
+    match collector.init(controller, interface, seed, &spawner) {
         Ok(_) => {}
         Err(_e) => {
             println!("Error Initializing CSI Collector");
@@ -538,7 +547,7 @@ async fn csi_collector(
 
     loop {
         // Start Collection
-        collector.start(interval).await;
+        let _ = collector.start(interval);
         // Reset Start Signal Once collection completes
         START_SIGNAL.reset();
         // Update Interval & Start Again when signalled
@@ -1074,10 +1083,11 @@ fn set_wifi<'a>(
     let max_connections = argument_finder(item, args, "max-connections");
     let hide_ssid = argument_finder(item, args, "hide-ssid");
     let ap_ssid = argument_finder(item, args, "ap-ssid");
-    // Placeholder for AP password. Adding a password without a AuthMethod results in a config error.
-    // let ap_password = argument_finder(item, args, "ap-password");
+
+    let ap_password = argument_finder(item, args, "ap-password");
     let sta_ssid = argument_finder(item, args, "sta-ssid");
     let sta_password = argument_finder(item, args, "sta-password");
+    let set_channel = argument_finder(item, args, "setchannel");
 
     match mode {
         Ok(str) => {
@@ -1120,6 +1130,19 @@ fn set_wifi<'a>(
         }
         Err(_) => (),
     }
+    match set_channel {
+        Ok(str) => {
+            if str.is_some() {
+                match str.unwrap().parse::<u8>() {
+                    Ok(chan) => CSI_COLLECTOR.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().wifi_config.channel = chan;
+                    }),
+                    Err(_) => writeln!(serial, "Invalid Max Connections").unwrap(),
+                }
+            }
+        }
+        Err(_) => (),
+    }
     match hide_ssid {
         Ok(str) => {
             if str.is_some() {
@@ -1151,26 +1174,26 @@ fn set_wifi<'a>(
         }
         Err(_) => (),
     }
-    // match ap_password {
-    //     Ok(str) => {
-    //         if let Some(s) = str {
-    //             let str_w_space = s.replace("_", " ");
-    //             // Convert the `mod_str` into a `heapless::String<32>`
-    //             let mut hpls_str_w_space = heapless::String::<64>::new();
-    //             hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
+    match ap_password {
+        Ok(str) => {
+            if let Some(s) = str {
+                let str_w_space = s.replace("_", " ");
+                // Convert the `mod_str` into a `heapless::String<32>`
+                let mut hpls_str_w_space = heapless::String::<64>::new();
+                hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-    //             CSI_COLLECTOR.lock(|config| {
-    //                 config
-    //                     .borrow_mut()
-    //                     .as_mut()
-    //                     .unwrap()
-    //                     .wifi_config
-    //                     .ap_password = hpls_str_w_space.try_into().unwrap();
-    //             });
-    //         }
-    //     }
-    //     Err(_) => (),
-    // }
+                CSI_COLLECTOR.lock(|config| {
+                    config
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .wifi_config
+                        .ap_password = hpls_str_w_space.try_into().unwrap();
+                });
+            }
+        }
+        Err(_) => (),
+    }
     match sta_ssid {
         Ok(str) => {
             if let Some(s) = str {
@@ -1214,6 +1237,12 @@ fn set_wifi<'a>(
         .unwrap();
         writeln!(
             serial,
+            "WiFi Channel: {:?}",
+            config.borrow().as_ref().unwrap().wifi_config.channel
+        )
+        .unwrap();
+        writeln!(
+            serial,
             "Station WiFi Settings:\nSSID: '{}', Password: '{}'",
             config.borrow().as_ref().unwrap().wifi_config.ssid,
             config.borrow().as_ref().unwrap().wifi_config.password,
@@ -1243,13 +1272,13 @@ fn start_csi_collect<'a>(
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u64>() {
-                    Ok(interval) => START_SIGNAL.signal(interval),
+                    Ok(interval) => START_SIGNAL.signal(Some(interval)),
                     Err(_) => writeln!(serial, "Invalid Duration").unwrap(),
                 }
             } else {
                 // Run for one week if no value provided
                 // 604800 seconds is equivalent to one week
-                START_SIGNAL.signal(Duration::from_secs(604800).as_secs());
+                START_SIGNAL.signal(None);
                 println!("Running Forever");
             }
         }
