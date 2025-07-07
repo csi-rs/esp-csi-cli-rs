@@ -73,6 +73,7 @@ defmt = [
 println = ["esp-backtrace/println", "esp-csi-rs/println"]
 
 [dependencies]
+esp-bootloader-esp-idf = "0.1.0"
 esp-hal-embassy = { version = "0.8.0", default-features = false }
 esp-backtrace = { version = "0.16.0", features = [
     "exception-handler",

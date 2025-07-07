@@ -10,6 +10,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
 use esp_backtrace as _;
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{config::TrafficType, NetworkArchitechture};
 use esp_csi_rs::{CSICollector, WiFiMode};
 use esp_hal::timer::timg::TimerGroup;
@@ -22,6 +23,8 @@ use esp_println::println;
 use esp_wifi::wifi::{Interfaces, WifiController};
 use esp_wifi::{init, EspWifiController};
 use menu::*;
+
+esp_app_desc!();
 
 extern crate alloc;
 
