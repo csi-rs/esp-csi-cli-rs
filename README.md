@@ -46,8 +46,6 @@ In order to use this crate, you would need to flash the source code for your tar
 | ESP32-C3 (defmt)       | `esp-csi-cli-rs-esp32c3-defmt.elf`           |
 | ESP32-C6               | `esp-csi-cli-rs-esp32c6.elf`                 |
 | ESP32-C6 (defmt)       | `esp-csi-cli-rs-esp32c6-defmt.elf`           |
-| ESP32-H2               | `esp-csi-cli-rs-esp32h2.elf`                 |
-| ESP32-H2 (defmt)       | `esp-csi-cli-rs-esp32h2-defmt.elf`           |
 | ESP32-S3               | `esp-csi-cli-rs-esp32s3.elf`                 |
 | ESP32-S3 (defmt)       | `esp-csi-cli-rs-esp32s3-defmt.elf`           |
 | ESP32                  | `esp-csi-cli-rs-esp32.elf`                   |
