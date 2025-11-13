@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use alloc::string::ToString;
 use core::cell::RefCell;
 use core::fmt::Write;
 use core::u64;
@@ -8,33 +9,176 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
-use esp_backtrace as _;
+use embassy_time::with_timeout;
+use embassy_time::Duration;
+use embassy_time::Timer;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::{config::TrafficType, NetworkArchitechture};
-use esp_csi_rs::{CSICollector, WiFiMode};
+use esp_csi_rs::collector::StaMonitorConfig;
+use esp_csi_rs::collector::{
+    ApOperationMode, ApTriggerConfig, CSIAccessPoint, CSIAccessPointStation, CSISniffer,
+    CSIStation, StaOperationMode, StaTriggerConfig,
+};
+use esp_csi_rs::config::CSIConfig;
+use esp_csi_rs::error::Result;
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(feature = "esp32")]
 use esp_hal::uart::{Config, Uart};
 #[cfg(not(feature = "esp32"))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Async;
+use esp_println::print;
 use esp_println::println;
+use esp_wifi::wifi::AuthMethod;
+use esp_wifi::wifi::{AccessPointConfiguration, ClientConfiguration};
 use esp_wifi::wifi::{Interfaces, WifiController};
 use esp_wifi::{init, EspWifiController};
+use heapless::String;
 use menu::*;
 
 esp_app_desc!();
 
 extern crate alloc;
 
-static CSI_COLLECTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<CSICollector>>> =
+// static CSI_COLLECTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<CSICollector>>> =
+//     Mutex::new(RefCell::new(None));
+
+static USER_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<UserConfig>>> =
     Mutex::new(RefCell::new(None));
+
 static START_SIGNAL: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
+#[derive(Debug, Clone)]
+struct UserConfig {
+    op_mode: WiFiMode,
+    trigger_freq: u64,
+    ap_ssid: heapless::String<32>,
+    ap_password: heapless::String<32>,
+    sta_ssid: heapless::String<32>,
+    sta_password: heapless::String<32>,
+    csi_config: CSIConfig,
+    max_connections: u16,
+    channel: u8,
+    ssid_hidden: bool,
+}
+
+impl UserConfig {
+    fn new() -> Self {
+        UserConfig {
+            op_mode: WiFiMode::Sniffer,
+            trigger_freq: 0,
+            ap_ssid: String::new(),
+            ap_password: String::new(),
+            sta_ssid: String::new(),
+            sta_password: String::new(),
+            csi_config: CSIConfig::default(),
+            max_connections: 1,
+            channel: 1,
+            ssid_hidden: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum WiFiMode {
+    AccessPoint,
+    AccessPointStation,
+    Station,
+    Sniffer,
+}
 
 #[derive(Default)]
 struct Context {
     _inner: u32,
+}
+
+trait CSICollector {
+    async fn init(&mut self, interfaces: Interfaces<'static>, spawner: &Spawner) -> Result<()>;
+    async fn start_collection(&mut self);
+    async fn print_csi_w_metadata(&mut self);
+    async fn stop_collection(&mut self);
+    async fn update_ap_op_mode(&mut self, op_mode: ApOperationMode);
+    async fn update_sta_op_mode(&mut self, op_mode: StaOperationMode);
+    async fn update_ap_config(&mut self, ap_config: AccessPointConfiguration);
+    async fn update_sta_config(&mut self, sta_config: ClientConfiguration);
+    async fn update_csi_config(&mut self, csi_config: CSIConfig);
+}
+
+enum UnifiedCSICollector {
+    AccessPoint(CSIAccessPoint),
+    AccessPointStation(CSIAccessPointStation),
+    Sniffer(CSISniffer),
+    Station(CSIStation),
+}
+
+impl CSICollector for UnifiedCSICollector {
+    async fn init(&mut self, interfaces: Interfaces<'static>, spawner: &Spawner) -> Result<()> {
+        match self {
+            Self::AccessPoint(c) => c.init(interfaces, spawner).await,
+            Self::AccessPointStation(c) => c.init(interfaces, spawner).await,
+            Self::Sniffer(c) => c.init(interfaces, spawner).await,
+            Self::Station(c) => c.init(interfaces, spawner).await,
+        }
+    }
+    async fn start_collection(&mut self) {
+        match self {
+            Self::AccessPoint(c) => c.start_collection().await,
+            Self::AccessPointStation(c) => c.start_collection().await,
+            Self::Sniffer(c) => c.start_collection().await,
+            Self::Station(c) => c.start_collection().await,
+        }
+    }
+
+    async fn print_csi_w_metadata(&mut self) {
+        match self {
+            Self::AccessPoint(c) => c.print_csi_w_metadata().await,
+            Self::AccessPointStation(c) => c.print_csi_w_metadata().await,
+            Self::Sniffer(c) => c.print_csi_w_metadata().await,
+            Self::Station(c) => c.print_csi_w_metadata().await,
+        }
+    }
+
+    async fn stop_collection(&mut self) {
+        match self {
+            Self::AccessPoint(c) => c.stop_collection().await,
+            Self::AccessPointStation(c) => c.stop_collection().await,
+            Self::Sniffer(c) => c.stop_collection().await,
+            Self::Station(c) => c.stop_collection().await,
+        }
+    }
+    async fn update_ap_op_mode(&mut self, op_mode: ApOperationMode) {
+        match self {
+            Self::AccessPoint(c) => c.update_op_mode(op_mode).await,
+            Self::AccessPointStation(c) => c.update_op_mode(op_mode).await,
+            _ => {}
+        }
+    }
+    async fn update_sta_op_mode(&mut self, op_mode: StaOperationMode) {
+        match self {
+            Self::Station(c) => c.update_op_mode(op_mode).await,
+            _ => {}
+        }
+    }
+    async fn update_ap_config(&mut self, ap_config: AccessPointConfiguration) {
+        match self {
+            Self::AccessPoint(c) => c.update_ap_config(ap_config).await,
+            Self::AccessPointStation(c) => c.update_ap_config(ap_config).await,
+            _ => {}
+        }
+    }
+    async fn update_sta_config(&mut self, sta_config: ClientConfiguration) {
+        match self {
+            Self::AccessPointStation(c) => c.update_sta_config(sta_config).await,
+            Self::Station(c) => c.update_sta_config(sta_config).await,
+            _ => {}
+        }
+    }
+    async fn update_csi_config(&mut self, csi_config: CSIConfig) {
+        match self {
+            Self::Sniffer(c) => c.update_csi_config(csi_config).await,
+            Self::Station(c) => c.update_csi_config(csi_config).await,
+            _ => {}
+        }
+    }
 }
 
 #[cfg(not(feature = "esp32"))]
@@ -50,19 +194,19 @@ const ROOT_MENU: Menu<SerialInterfaceType, Context> = Menu {
             item_type: ItemType::Callback {
                 function: set_traffic,
                 parameters: &[
-                    Parameter::Named {
-                        parameter_name: "enable",
-                        help: Some("Enables Traffic Generation"),
-                    },
+                    // Parameter::Named {
+                    //     parameter_name: "enable",
+                    //     help: Some("Enables Traffic Generation"),
+                    // },
                     Parameter::NamedValue {
                         parameter_name: "type",
                         argument_name: "type",
                         help: Some("Traffic Type"),
                     },
                     Parameter::NamedValue {
-                        parameter_name: "interval",
-                        argument_name: "interval",
-                        help: Some("Traffic Generation Interval"),
+                        parameter_name: "frequency-hz",
+                        argument_name: "frequency-hz",
+                        help: Some("Traffic Generation Frequency"),
                     },
                 ],
             },
@@ -74,51 +218,15 @@ Usage:
   set-traffic [OPTIONS]
 
 Options:
-  --enable                     Enable traffic generation (default: disabled).
-  --type=<icmp|udp>        Set the type of traffic (default: icmp).
-  --interval-ms=<NUMBER>       Specify the traffic interval in milliseconds (default: 1000).
+  --frequency-hz=<NUMBER>      Specify the traffic frequencey in Hz (default: 0).
 
 Examples:
-  set-traffic --enable --type=udp --interval-ms=50
-  set-traffic --enable
+  set-traffic --frequency-hz=10
 
 Description:
   This command allows you to configure traffic parameters for the CSI collection process.
-  You can enable traffic generation, set the traffic type, and specify the interval 
-  between generated packets.",
-            ),
-        },
-        &Item {
-            item_type: ItemType::Callback {
-                function: set_network,
-                parameters: &[Parameter::NamedValue {
-                    parameter_name: "arch",
-                    argument_name: "arch",
-                    help: Some("Desired Network Architecture"),
-                }],
-            },
-            command: "set-network",
-            help: Some("set-network - Configure network architecture settings.
-
-NOTE: Setting the network architechture is only necessary if NTP synchronization is desired
-
-Usage:
-  set-network [OPTIONS]
-
-Options:
-  --arch=<rsta|rapsta|apsta|sniff>      Define the network architecture (default: sniff).
-
-Examples:
-  set-network --arch=rsta
-  set-network --arch=apsta
-
-Description:
-  This command is used to configure the network architecture for the CSI collection process.
-  The architecture can be set to:
-    - `rsta`: Internet-based router connected to one station.
-    - `rapsta`: Internet-based router connected to Access Point + Station that is Connected to One or More Station(s).
-    - `apsta`: Access point connected to one or more stations. No NTP sync perfromed.
-    - `sniff`: Standalone device sniffing packets. No NTP sync performed. (default setting).",
+  You can enable traffic generation and specify the interval 
+  between generated packets. Setting a value of zero disbles traffic generation.",
             ),
         },
         #[cfg(not(feature = "esp32c6"))]
@@ -163,7 +271,10 @@ Examples:
 Description:
 This command allows you to enable or disable specific Channel State Information (CSI) features. 
 By default, all CSI features are enabled. Use the options to selectively disable specific
-configurations if necessary."),
+configurations if necessary.
+
+Note:
+CSI Configuration is ignored when running in Access Point Mode."),
         },
         #[cfg(feature = "esp32c6")]
         &Item {
@@ -320,7 +431,9 @@ Description:
       - `sniffer`: Monitor WiFi traffic passively.
       - `ap-station`: Simultaneously act as an AP and connect to another network.
 
-  - Use `--hide-ssid` to make the SSID of an AP invisible to scanning devices."),
+  - Use `--hide-ssid` to make the SSID of an AP invisible to scanning devices.
+  
+IMPORTANT: Changing the WiFi mode after the first run requires a device reset"),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -335,8 +448,6 @@ Description:
             },
             command: "start",
             help: Some("start - Start the CSI collection process.
-
-NOTE: If configured as a Station, make sure there is already a running/started Access Point
 
 Usage:
   start [OPTIONS]
@@ -414,7 +525,7 @@ Description:
 
 fn enter_root(
     _menu: &Menu<SerialInterfaceType, Context>,
-    interface: &mut SerialInterfaceType,
+    mut interface: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     interface
@@ -424,10 +535,9 @@ fn enter_root(
     interface
         .write_str(
             "Available Commands:
-    set-traffic         Configure traffic-related parameters (e.g. type, interval).
-    set-network         Configure network architecture settings.
-    set-csi             Configure CSI feature flags (e.g., LLTF, HTLTF).
     set-wifi            Configure WiFi settings (e.g., mode, SSID visibility).
+    set-traffic         Configure traffic-related parameters (e.g. interval).
+    set-csi             Configure CSI feature flags (e.g., LLTF, HTLTF).
     start               Start the CSI collection process with a defined duration.
     show-config         Display the current configuration settings.
     reset-config        Reset all configurations to their default values.
@@ -468,29 +578,33 @@ async fn main(spawner: Spawner) {
 
     // Instantiate peripherals for EspWifiController
     let timer = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    let mut rng = esp_hal::rng::Rng::new(peripherals.RNG);
-    let seed = rng.random();
+    let rng = esp_hal::rng::Rng::new(peripherals.RNG);
 
     // Initialize ESP WiFi Controller
-    let init = &*mk_static!(
-        EspWifiController<'static>,
-        init(timer.timer0, rng, peripherals.RADIO_CLK).unwrap()
-    );
+    let init = &*mk_static!(EspWifiController<'static>, init(timer.timer0, rng).unwrap());
 
     // Instantiate WiFi controller and interfaces
     let (controller, interfaces) = esp_wifi::wifi::new(&init, peripherals.WIFI).unwrap();
 
-    // Create an instance for the CSI Collector
-    let csi_config = CSICollector::new_with_defaults();
+    // Create an instance for User Configurations
+    let user_config = UserConfig::new();
 
-    // Pass Collector Instance to Global Context
-    CSI_COLLECTOR.lock(|config| {
-        config.replace(Some(csi_config));
+    // Pass User Config Instance to Global Context
+    USER_CONFIG.lock(|config| {
+        config.replace(Some(user_config));
     });
+
+    // // Create an instance for the CSI Collector
+    // let csi_config = CSICollector::new_with_defaults();
+
+    // // Pass Collector Instance to Global Context
+    // CSI_COLLECTOR.lock(|config| {
+    //     config.replace(Some(csi_config));
+    // });
 
     // Spawn the CSI Collection Task
     spawner
-        .spawn(csi_collector(controller, interfaces, seed as u64, spawner))
+        .spawn(csi_collector(controller, interfaces, spawner))
         .unwrap();
 
     // Instantiate Serial Interface for CLI host communication
@@ -509,7 +623,7 @@ async fn main(spawner: Spawner) {
     };
 
     // Create a buffer to store CLI input
-    let mut clibuf = [0u8; 128];
+    let mut clibuf = [0u8; 256];
     // Instantiate Context placeholder
     let mut context = Context::default();
     // Instantiate CLI runner with root menu, buffer, and serial
@@ -529,34 +643,248 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn csi_collector(
     controller: WifiController<'static>,
-    interface: Interfaces<'static>,
-    seed: u64,
+    interfaces: Interfaces<'static>,
     spawner: Spawner,
 ) {
-    // Wait for first start signal to kick off collection activity
-    let mut interval = START_SIGNAL.wait().await;
+    // Wait for start signal to kick off collection activity
+    let mut duration = match START_SIGNAL.wait().await {
+        Some(d) => Duration::from_secs(d),
+        None => Duration::MAX / 2,
+    };
+    START_SIGNAL.reset();
 
-    // Obtain copy from CSI collector in global context
-    let mut collector =
-        CSI_COLLECTOR.lock(|collector| (collector.borrow().as_ref().unwrap().clone()));
+    // Obtain Configurations
+    let user_config =
+        USER_CONFIG.lock(|userconfig| (userconfig.borrow().as_ref().unwrap().clone()));
 
-    // Initalize CSI collector
-    match collector.init(controller, interface, seed, &spawner) {
-        Ok(_) => {}
-        Err(_e) => {
-            println!("Error Initializing CSI Collector");
+    let mut traffic_en = if user_config.trigger_freq != 0 {
+        true
+    } else {
+        false
+    };
+
+    // If traffic frequency not equal to zero that means that traffic is enabled
+    let (sta_op_mode, ap_op_mode) = if traffic_en {
+        (
+            StaOperationMode::Trigger(StaTriggerConfig {
+                trigger_freq_hz: user_config.trigger_freq as u32,
+            }),
+            ApOperationMode::Trigger(ApTriggerConfig {
+                trigger_freq_hz: user_config.trigger_freq as u32,
+                ..Default::default()
+            }),
+        )
+    } else {
+        (
+            StaOperationMode::Monitor(StaMonitorConfig::default()),
+            ApOperationMode::Monitor,
+        )
+    };
+
+    // Determine WiFi Mode to start Operation
+    let mut collector: UnifiedCSICollector = match user_config.op_mode {
+        WiFiMode::AccessPoint => {
+            let csi_coll_ap = CSIAccessPoint::new(
+                AccessPointConfiguration {
+                    ssid: user_config.ap_ssid.to_string(),
+                    password: user_config.ap_password.to_string(),
+                    auth_method: AuthMethod::WPA2Personal,
+                    max_connections: user_config.max_connections,
+                    ..Default::default()
+                },
+                ap_op_mode,
+                controller,
+            )
+            .await;
+
+            UnifiedCSICollector::AccessPoint(csi_coll_ap)
         }
-    }
+        WiFiMode::AccessPointStation => {
+            let csi_coll_ap = CSIAccessPointStation::new(
+                AccessPointConfiguration {
+                    ssid: user_config.ap_ssid.to_string(),
+                    password: user_config.ap_password.to_string(),
+                    auth_method: AuthMethod::WPA2Personal,
+                    max_connections: user_config.max_connections,
+                    channel: user_config.channel,
+                    ..Default::default()
+                },
+                ClientConfiguration {
+                    ssid: user_config.sta_ssid.to_string(),
+                    auth_method: AuthMethod::WPA2Personal,
+                    password: user_config.sta_password.to_string(),
+                    channel: Some(user_config.channel),
+                    ..Default::default()
+                },
+                ap_op_mode,
+                controller,
+            )
+            .await;
+            UnifiedCSICollector::AccessPointStation(csi_coll_ap)
+        }
+        WiFiMode::Station => {
+            let csi_coll_sta = CSIStation::new(
+                user_config.csi_config,
+                ClientConfiguration {
+                    ssid: user_config.sta_ssid.to_string(),
+                    password: user_config.sta_password.to_string(),
+                    auth_method: AuthMethod::WPA2Personal,
+                    ..Default::default()
+                },
+                sta_op_mode,
+                false,
+                controller,
+            )
+            .await;
+
+            UnifiedCSICollector::Station(csi_coll_sta)
+        }
+        WiFiMode::Sniffer => {
+            UnifiedCSICollector::Sniffer(CSISniffer::new(user_config.csi_config, controller).await)
+        }
+    };
+
+    // Initialize the Collector
+    collector.init(interfaces, &spawner).await.unwrap();
 
     loop {
-        // Start Collection
-        let _ = collector.start(interval);
-        // Reset Start Signal Once collection completes
+        collector.start_collection().await;
+
+        with_timeout(duration, async {
+            loop {
+                match user_config.op_mode {
+                    WiFiMode::AccessPoint => {
+                        if traffic_en {
+                            collector.print_csi_w_metadata().await;
+                        } else {
+                            Timer::after(Duration::from_millis(1)).await;
+                        }
+                    }
+                    WiFiMode::AccessPointStation => {
+                        if traffic_en {
+                            collector.print_csi_w_metadata().await;
+                        } else {
+                            Timer::after(Duration::from_millis(1)).await;
+                        }
+                    }
+                    WiFiMode::Station => {
+                        if traffic_en {
+                            collector.print_csi_w_metadata().await;
+                        } else {
+                            Timer::after(Duration::from_millis(1)).await;
+                        }
+                    }
+                    WiFiMode::Sniffer => {
+                        collector.print_csi_w_metadata().await;
+                    }
+                    _ => {}
+                };
+            }
+        })
+        .await
+        .unwrap_err();
+
+        collector.stop_collection().await;
+
+        print!("> ");
+
+        // Wait for start signal
+        duration = match START_SIGNAL.wait().await {
+            Some(d) => Duration::from_secs(d),
+            None => Duration::MAX / 2,
+        };
+
         START_SIGNAL.reset();
-        // Update Interval & Start Again when signalled
-        interval = START_SIGNAL.wait().await;
-        // Obtain new configuration before starting again
-        collector = CSI_COLLECTOR.lock(|collector| (collector.borrow().as_ref().unwrap().clone()));
+
+        // Obtain Updated Configuration
+        let updated_config =
+            USER_CONFIG.lock(|userconfig| (userconfig.borrow().as_ref().unwrap().clone()));
+
+        traffic_en = if updated_config.trigger_freq != 0 {
+            true
+        } else {
+            false
+        };
+
+        // Update each accordingly
+        match updated_config.op_mode {
+            WiFiMode::AccessPoint => {
+                collector
+                    .update_ap_config(AccessPointConfiguration {
+                        ssid: updated_config.ap_ssid.to_string(),
+                        password: updated_config.ap_password.to_string(),
+                        auth_method: AuthMethod::WPA2Personal,
+                        max_connections: updated_config.max_connections,
+                        ..Default::default()
+                    })
+                    .await;
+                if traffic_en {
+                    collector
+                        .update_ap_op_mode(ApOperationMode::Trigger(ApTriggerConfig {
+                            trigger_freq_hz: updated_config.trigger_freq as u32,
+                            ..Default::default()
+                        }))
+                        .await;
+                } else {
+                    collector.update_ap_op_mode(ApOperationMode::Monitor).await;
+                }
+            }
+            WiFiMode::AccessPointStation => {
+                collector
+                    .update_ap_config(AccessPointConfiguration {
+                        ssid: updated_config.ap_ssid.to_string(),
+                        password: updated_config.ap_password.to_string(),
+                        auth_method: AuthMethod::WPA2Personal,
+                        max_connections: updated_config.max_connections,
+                        ..Default::default()
+                    })
+                    .await;
+                collector
+                    .update_sta_config(ClientConfiguration {
+                        ssid: updated_config.sta_ssid.to_string(),
+                        password: updated_config.sta_password.to_string(),
+                        auth_method: AuthMethod::WPA2Personal,
+                        ..Default::default()
+                    })
+                    .await;
+                if traffic_en {
+                    collector
+                        .update_ap_op_mode(ApOperationMode::Trigger(ApTriggerConfig {
+                            trigger_freq_hz: updated_config.trigger_freq as u32,
+                            ..Default::default()
+                        }))
+                        .await;
+                } else {
+                    collector.update_ap_op_mode(ApOperationMode::Monitor).await;
+                }
+            }
+            WiFiMode::Station => {
+                collector
+                    .update_sta_config(ClientConfiguration {
+                        ssid: updated_config.sta_ssid.to_string(),
+                        password: updated_config.sta_password.to_string(),
+                        auth_method: AuthMethod::WPA2Personal,
+                        ..Default::default()
+                    })
+                    .await;
+                collector.update_csi_config(updated_config.csi_config);
+                if traffic_en {
+                    collector
+                        .update_sta_op_mode(StaOperationMode::Trigger(StaTriggerConfig {
+                            trigger_freq_hz: updated_config.trigger_freq as u32,
+                        }))
+                        .await;
+                } else {
+                    collector
+                        .update_sta_op_mode(StaOperationMode::Monitor(StaMonitorConfig::default()))
+                        .await;
+                }
+            }
+            WiFiMode::Sniffer => {
+                collector.update_csi_config(updated_config.csi_config).await;
+            }
+            _ => {}
+        };
     }
 }
 
@@ -567,56 +895,50 @@ fn set_traffic<'a>(
     serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
-    let traffic_en = argument_finder(item, args, "enable");
-    let traffic_type = argument_finder(item, args, "type");
-    let traffic_interval = argument_finder(item, args, "interval");
+    // let traffic_en = argument_finder(item, args, "enable");
+    let traffic_interval = argument_finder(item, args, "frequency-hz");
 
-    match traffic_en {
-        Ok(_str) => CSI_COLLECTOR.lock(|config| {
-            config.borrow_mut().as_mut().unwrap().traffic_enabled = true;
-        }),
-        Err(_) => (),
-    }
-    match traffic_type {
-        Ok(str) => {
-            if str.is_some() {
-                match str.unwrap() {
-                    "icmp" => CSI_COLLECTOR.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .traffic_config
-                            .traffic_type = TrafficType::ICMPPing;
-                    }),
-                    "udp" => CSI_COLLECTOR.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .traffic_config
-                            .traffic_type = TrafficType::UDP;
-                    }),
-                    _ => writeln!(serial, "Invalid Traffic Type").unwrap(),
-                }
-            }
-        }
-        Err(_) => (),
-    }
+    // match traffic_en {
+    //     Ok(_str) => CSI_COLLECTOR.lock(|config| {
+    //         config.borrow_mut().as_mut().unwrap().traffic_enabled = true;
+    //     }),
+    //     Err(_) => (),
+    // }
+    // match traffic_type {
+    //     Ok(str) => {
+    //         if str.is_some() {
+    //             match str.unwrap() {
+    //                 "icmp" => CSI_ACCESSPOINT.lock(|config| {
+    //                     config
+    //                         .borrow_mut()
+    //                         .as_mut()
+    //                         .unwrap()
+    //                         .op_mode
+    //                         .traffic_type = TrafficType::ICMPPing;
+    //                 }),
+    //                 "udp" => CSI_COLLECTOR.lock(|config| {
+    //                     config
+    //                         .borrow_mut()
+    //                         .as_mut()
+    //                         .unwrap()
+    //                         .traffic_config
+    //                         .traffic_type = TrafficType::UDP;
+    //                 }),
+    //                 _ => writeln!(serial, "Invalid Traffic Type").unwrap(),
+    //             }
+    //         }
+    //     }
+    //     Err(_) => (),
+    // }
 
     match traffic_interval {
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u64>() {
-                    Ok(interval) => CSI_COLLECTOR.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .traffic_config
-                            .traffic_interval_ms = interval
+                    Ok(interval) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().trigger_freq = interval
                     }),
-                    Err(_) => writeln!(serial, "Invalid Interval").unwrap(),
+                    Err(_) => writeln!(serial, "Invalid Frequency").unwrap(),
                 }
             }
         }
@@ -624,79 +946,11 @@ fn set_traffic<'a>(
     }
 
     writeln!(serial, "\nUpdated Traffic Configuration:\n").unwrap();
-    CSI_COLLECTOR.lock(|config| {
+    USER_CONFIG.lock(|config| {
         writeln!(
             serial,
-            "Traffic Enabled: {}",
-            config.borrow().as_ref().unwrap().traffic_enabled
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Traffic Type: {:?}",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .traffic_config
-                .traffic_type
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Traffic Interval: {}ms",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .traffic_config
-                .traffic_interval_ms
-        )
-        .unwrap();
-    });
-}
-
-fn set_network<'a>(
-    _menu: &Menu<SerialInterfaceType, Context>,
-    item: &Item<SerialInterfaceType, Context>,
-    args: &[&str],
-    serial: &mut SerialInterfaceType,
-    _context: &mut Context,
-) {
-    let arch = argument_finder(item, args, "arch");
-
-    match arch {
-        Ok(str) => {
-            if str.is_some() {
-                match str.unwrap() {
-                    "rsta" => CSI_COLLECTOR.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().net_arch =
-                            NetworkArchitechture::RouterStation;
-                    }),
-                    "rapsta" => CSI_COLLECTOR.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().net_arch =
-                            NetworkArchitechture::RouterAccessPointStation;
-                    }),
-                    "apsta" => CSI_COLLECTOR.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().net_arch =
-                            NetworkArchitechture::AccessPointStation;
-                    }),
-                    "sniff" => CSI_COLLECTOR.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().net_arch =
-                            NetworkArchitechture::Sniffer;
-                    }),
-                    _ => writeln!(serial, "Invalid Network Type").unwrap(),
-                }
-            }
-        }
-        Err(_) => (),
-    }
-
-    CSI_COLLECTOR.lock(|config| {
-        writeln!(
-            serial,
-            "\nUpdated Network Architechture Configuration to {:?}",
-            config.borrow().as_ref().unwrap().net_arch
+            "Traffic Frequency: {}Hz",
+            config.borrow().as_ref().unwrap().trigger_freq
         )
         .unwrap();
     });
@@ -724,7 +978,7 @@ fn set_csi<'a>(
     match disable_csi {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR
+                USER_CONFIG
                     .lock(|config| config.borrow_mut().as_mut().unwrap().csi_config.enable = 0)
             }
         }
@@ -733,7 +987,7 @@ fn set_csi<'a>(
     match disable_csi_legacy {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -748,7 +1002,7 @@ fn set_csi<'a>(
     match disable_csi_ht20 {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -763,7 +1017,7 @@ fn set_csi<'a>(
     match disable_csi_ht40 {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -778,7 +1032,7 @@ fn set_csi<'a>(
     match disable_csi_su {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -793,7 +1047,7 @@ fn set_csi<'a>(
     match disable_csi_mu {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -808,7 +1062,7 @@ fn set_csi<'a>(
     match disable_csi_dcm {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -823,7 +1077,7 @@ fn set_csi<'a>(
     match disable_csi_beamformed {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -839,7 +1093,7 @@ fn set_csi<'a>(
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u32>() {
-                    Ok(val) => CSI_COLLECTOR.lock(|config| {
+                    Ok(val) => USER_CONFIG.lock(|config| {
                         config
                             .borrow_mut()
                             .as_mut()
@@ -857,7 +1111,7 @@ fn set_csi<'a>(
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u32>() {
-                    Ok(val) => CSI_COLLECTOR.lock(|config| {
+                    Ok(val) => USER_CONFIG.lock(|config| {
                         config
                             .borrow_mut()
                             .as_mut()
@@ -873,7 +1127,7 @@ fn set_csi<'a>(
     }
 
     writeln!(serial, "\nUpdated CSI Configuration:\n").unwrap();
-    CSI_COLLECTOR.lock(|config| {
+    USER_CONFIG.lock(|config| {
         writeln!(
             serial,
             "Acquire CSI: {}",
@@ -967,7 +1221,7 @@ fn set_csi<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     item: &Item<SerialInterfaceType, Context>,
     args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     let disable_lltf = argument_finder(item, args, "disable-lltf");
@@ -978,7 +1232,7 @@ fn set_csi<'a>(
     match disable_lltf {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -993,7 +1247,7 @@ fn set_csi<'a>(
     match disable_htltf {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -1008,7 +1262,7 @@ fn set_csi<'a>(
     match disable_stbc_htltf {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -1023,7 +1277,7 @@ fn set_csi<'a>(
     match disable_ltf_merge {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
+                USER_CONFIG.lock(|config| {
                     config
                         .borrow_mut()
                         .as_mut()
@@ -1037,7 +1291,7 @@ fn set_csi<'a>(
     }
 
     writeln!(serial, "\nUpdated CSI Configuration:\n").unwrap();
-    CSI_COLLECTOR.lock(|config| {
+    USER_CONFIG.lock(|config| {
         writeln!(
             serial,
             "LLTF Enabled: {}",
@@ -1079,7 +1333,7 @@ fn set_wifi<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     item: &Item<SerialInterfaceType, Context>,
     args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     let mode = argument_finder(item, args, "mode");
@@ -1090,22 +1344,22 @@ fn set_wifi<'a>(
     let ap_password = argument_finder(item, args, "ap-password");
     let sta_ssid = argument_finder(item, args, "sta-ssid");
     let sta_password = argument_finder(item, args, "sta-password");
-    let set_channel = argument_finder(item, args, "setchannel");
+    let set_channel = argument_finder(item, args, "set-channel");
 
     match mode {
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap() {
-                    "ap" => CSI_COLLECTOR.lock(|config| {
+                    "ap" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().op_mode = WiFiMode::AccessPoint;
                     }),
-                    "station" => CSI_COLLECTOR.lock(|config| {
+                    "station" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().op_mode = WiFiMode::Station;
                     }),
-                    "sniffer" => CSI_COLLECTOR.lock(|config| {
+                    "sniffer" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().op_mode = WiFiMode::Sniffer;
                     }),
-                    "ap-station" => CSI_COLLECTOR.lock(|config| {
+                    "ap-station" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().op_mode =
                             WiFiMode::AccessPointStation;
                     }),
@@ -1119,13 +1373,8 @@ fn set_wifi<'a>(
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u16>() {
-                    Ok(max_conn) => CSI_COLLECTOR.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .wifi_config
-                            .max_connections = max_conn;
+                    Ok(max_conn) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().max_connections = max_conn;
                     }),
                     Err(_) => writeln!(serial, "Invalid Max Connections").unwrap(),
                 }
@@ -1137,8 +1386,8 @@ fn set_wifi<'a>(
         Ok(str) => {
             if str.is_some() {
                 match str.unwrap().parse::<u8>() {
-                    Ok(chan) => CSI_COLLECTOR.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().wifi_config.channel = chan;
+                    Ok(chan) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().channel = chan;
                     }),
                     Err(_) => writeln!(serial, "Invalid Max Connections").unwrap(),
                 }
@@ -1149,13 +1398,8 @@ fn set_wifi<'a>(
     match hide_ssid {
         Ok(str) => {
             if str.is_some() {
-                CSI_COLLECTOR.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .wifi_config
-                        .ssid_hidden = true;
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().ssid_hidden = true;
                 })
             }
         }
@@ -1169,8 +1413,8 @@ fn set_wifi<'a>(
                 let mut hpls_str_w_space = heapless::String::<32>::new();
                 hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-                CSI_COLLECTOR.lock(|config| {
-                    config.borrow_mut().as_mut().unwrap().wifi_config.ap_ssid =
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().ap_ssid =
                         hpls_str_w_space.try_into().unwrap();
                 });
             }
@@ -1182,16 +1426,11 @@ fn set_wifi<'a>(
             if let Some(s) = str {
                 let str_w_space = s.replace("_", " ");
                 // Convert the `mod_str` into a `heapless::String<32>`
-                let mut hpls_str_w_space = heapless::String::<64>::new();
+                let mut hpls_str_w_space = heapless::String::<32>::new();
                 hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-                CSI_COLLECTOR.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .wifi_config
-                        .ap_password = hpls_str_w_space.try_into().unwrap();
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().ap_password = hpls_str_w_space;
                 });
             }
         }
@@ -1205,8 +1444,8 @@ fn set_wifi<'a>(
                 let mut hpls_str_w_space = heapless::String::<32>::new();
                 hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-                CSI_COLLECTOR.lock(|config| {
-                    config.borrow_mut().as_mut().unwrap().wifi_config.ssid =
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().sta_ssid =
                         hpls_str_w_space.try_into().unwrap();
                 });
             }
@@ -1218,12 +1457,11 @@ fn set_wifi<'a>(
             if let Some(s) = str {
                 let str_w_space = s.replace("_", " ");
                 // Convert the `mod_str` into a `heapless::String<32>`
-                let mut hpls_str_w_space = heapless::String::<64>::new();
+                let mut hpls_str_w_space = heapless::String::<32>::new();
                 hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
 
-                CSI_COLLECTOR.lock(|config| {
-                    config.borrow_mut().as_mut().unwrap().wifi_config.password =
-                        hpls_str_w_space.try_into().unwrap();
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().sta_password = hpls_str_w_space
                 });
             }
         }
@@ -1231,7 +1469,7 @@ fn set_wifi<'a>(
     }
 
     writeln!(serial, "\nUpdated WiFi Configuration:\n").unwrap();
-    CSI_COLLECTOR.lock(|config| {
+    USER_CONFIG.lock(|config| {
         writeln!(
             serial,
             "WiFi Operation Mode: {:?}",
@@ -1241,23 +1479,23 @@ fn set_wifi<'a>(
         writeln!(
             serial,
             "WiFi Channel: {:?}",
-            config.borrow().as_ref().unwrap().wifi_config.channel
+            config.borrow().as_ref().unwrap().channel
         )
         .unwrap();
         writeln!(
             serial,
             "Station WiFi Settings:\nSSID: '{}', Password: '{}'",
-            config.borrow().as_ref().unwrap().wifi_config.ssid,
-            config.borrow().as_ref().unwrap().wifi_config.password,
+            config.borrow().as_ref().unwrap().sta_ssid,
+            config.borrow().as_ref().unwrap().sta_password,
         )
         .unwrap();
         writeln!(
             serial,
             "Access Point WiFi Settings:\nSSID: '{}', Password: '{}', SSID Hidden: {}, Max Connections: {}",
-            config.borrow().as_ref().unwrap().wifi_config.ap_ssid,
-            config.borrow().as_ref().unwrap().wifi_config.ap_password,
-            config.borrow().as_ref().unwrap().wifi_config.ssid_hidden,
-            config.borrow().as_ref().unwrap().wifi_config.max_connections,
+            config.borrow().as_ref().unwrap().ap_ssid,
+            config.borrow().as_ref().unwrap().ap_password,
+            config.borrow().as_ref().unwrap().ssid_hidden,
+            config.borrow().as_ref().unwrap().max_connections,
         )
         .unwrap();
     });
@@ -1267,7 +1505,7 @@ fn start_csi_collect<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     item: &Item<SerialInterfaceType, Context>,
     args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     let duration = argument_finder(item, args, "duration");
@@ -1279,10 +1517,7 @@ fn start_csi_collect<'a>(
                     Err(_) => writeln!(serial, "Invalid Duration").unwrap(),
                 }
             } else {
-                // Run for one week if no value provided
-                // 604800 seconds is equivalent to one week
                 START_SIGNAL.signal(None);
-                println!("Running Forever");
             }
         }
         Err(_) => (),
@@ -1297,40 +1532,15 @@ fn show_config<'a>(
     _context: &mut Context,
 ) {
     writeln!(serial, "\nTraffic Settings:").unwrap();
-    CSI_COLLECTOR.lock(|config| {
+    USER_CONFIG.lock(|config| {
         writeln!(
             serial,
-            "Traffic Enabled: {}",
-            config.borrow().as_ref().unwrap().traffic_enabled
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Traffic Type: {:?}",
+            "Traffic Frequency: {}Hz",
             config
                 .borrow()
                 .as_ref()
                 .unwrap()
-                .traffic_config
-                .traffic_type
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Traffic Interval: {}ms",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .traffic_config
-                .traffic_interval_ms
-        )
-        .unwrap();
-        writeln!(serial, "\nNetwork Architecture Settings:").unwrap();
-        writeln!(
-            serial,
-            "Network Architecture: {:?}",
-            config.borrow().as_ref().unwrap().net_arch
+                .trigger_freq
         )
         .unwrap();
         writeln!(serial, "\nCSI Settings:").unwrap();
@@ -1436,17 +1646,17 @@ fn show_config<'a>(
         writeln!(
             serial,
             "Station WiFi Settings:\nSSID: '{}', Password: '{}'",
-            config.borrow().as_ref().unwrap().wifi_config.ssid,
-            config.borrow().as_ref().unwrap().wifi_config.password,
+            config.borrow().as_ref().unwrap().sta_ssid,
+            config.borrow().as_ref().unwrap().sta_password,
         )
         .unwrap();
         writeln!(
             serial,
             "Access Point WiFi Settings:\nSSID: '{}', Password: '{}', SSID Hidden: {}, Max Connections: {}",
-            config.borrow().as_ref().unwrap().wifi_config.ap_ssid,
-            config.borrow().as_ref().unwrap().wifi_config.ap_password,
-            config.borrow().as_ref().unwrap().wifi_config.ssid_hidden,
-            config.borrow().as_ref().unwrap().wifi_config.max_connections,
+            config.borrow().as_ref().unwrap().ap_ssid,
+            config.borrow().as_ref().unwrap().ap_password,
+            config.borrow().as_ref().unwrap().ssid_hidden,
+            config.borrow().as_ref().unwrap().max_connections,
         )
         .unwrap();
     });
@@ -1456,11 +1666,11 @@ fn reset_config<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     _item: &Item<SerialInterfaceType, Context>,
     _args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
-    CSI_COLLECTOR.lock(|config| {
-        let default_config = CSICollector::new_with_defaults();
+    USER_CONFIG.lock(|config: &RefCell<Option<_>>| {
+        let default_config = UserConfig::new();
         config.replace(Some(default_config));
     });
     writeln!(serial, "\nConfiguration Reset to Default Values\n").unwrap();

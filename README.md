@@ -18,8 +18,7 @@ In order to use this crate, you would need to flash the source code for your tar
 ## Features
 
 * **Multiple Wi-Fi Modes:** Configure the ESP device as an Access Point (AP), Station (STA), AP+STA, or Sniffer.
-* **Configurable Network Architecture:** Set up the network topology for different scenarios.
-* **Traffic Generation:** Optionally generate ICMP or UDP traffic at configurable intervals.
+* **Traffic Generation:** Generate traffic at configurable intervals.
 * **Fine-grained CSI Control:** Enable or disable specific CSI features like LLTF, HTLTF, STBC HTLTF, and LTF Merge.
 * **CLI Control:** Interact with the device using simple commands over a serial connection.
 * **Configuration Management:** Show the current configuration or reset to defaults.
@@ -85,20 +84,9 @@ This is a list of commands available through the CLI interface:
 * **`set-traffic [OPTIONS]`**
     * Description: Configure traffic-related parameters.
     * Options:
-        * `--enable`: Enable traffic generation (default: disabled).
-        * `--type=<icmp|udp>`: Set the type of traffic (default: icmp).
-        * `--interval-ms=<NUMBER>`: Specify the traffic interval in milliseconds (default: 1000).
+        * `--frequency-hz=<NUMBER>`: Specify the traffic frequency in Hertz (default: 0).
     * Examples:
-        * `set-traffic --enable --type=udp --interval-ms=50`
-        * `set-traffic --enable`
-
-* **`set-network [OPTIONS]`**
-    * Description: Configure network architecture settings (primarily for NTP sync).
-    * Options:
-        * `--arch=<rsta|rapsta|apsta|sniff>`: Define the network architecture (default: sniff).
-    * Examples:
-        * `set-network --arch=rsta`
-        * `set-network --arch=apsta`
+        * `set-traffic --frequency-hz=10`
 
 * **`set-csi [OPTIONS]`**
     * Description: Configure CSI feature flags.
@@ -143,17 +131,17 @@ This is a list of commands available through the CLI interface:
 
 ## CLI Configuration Examples
 
-1.  **Configure an ESP as an AP and start collecting for 5 minutes:**
+1.  **Configure an ESP as an AP that generates traffic to connecting stations and start collecting for 5 minutes:**
     ```
     set-wifi --mode ap
     set-wifi --ap-ssid=ESP_CSI_AP 
     set-wifi --ap-password=testing123
-    set-traffic --enable --type=icmp --interval-ms=500
+    set-traffic --frequency-hz=20
     show-config
     start --duration=300
     ```
 
-2.  **Configure as a Station connected to an existing network, disable some CSI features, and start collecting indefinitely:**
+2.  **Configure an ESP as a Station Monitor connected to an existing network, disable some CSI features, and start collecting indefinitely:**
     ```
     set-wifi --mode station 
     set-wifi --sta-ssid=My_Router
@@ -167,7 +155,7 @@ This is a list of commands available through the CLI interface:
 
 > 🛑 SSIDs and passwords containing spaces must have the spaces replaced with underscores (`_`) when using the `set-wifi` command. The application will convert them back internally.
 
-> 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise collection will fail as the station wont habe an AP to connect to.
+> 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise the application will `panic` as the station wont habe an AP to connect to.
 
 ## Building From Source (Optional)
 Rather than downloading pre-built binaries, another approach is to clone the repository and build the source. This would require some additional dependencies and modifications depending on the device you are using.
