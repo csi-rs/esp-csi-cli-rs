@@ -867,7 +867,7 @@ async fn csi_collector(
                         ..Default::default()
                     })
                     .await;
-                collector.update_csi_config(updated_config.csi_config);
+                collector.update_csi_config(updated_config.csi_config).await;
                 if traffic_en {
                     collector
                         .update_sta_op_mode(StaOperationMode::Trigger(StaTriggerConfig {
@@ -892,7 +892,7 @@ fn set_traffic<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     item: &Item<SerialInterfaceType, Context>,
     args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     // let traffic_en = argument_finder(item, args, "enable");
@@ -1528,7 +1528,7 @@ fn show_config<'a>(
     _menu: &Menu<SerialInterfaceType, Context>,
     _item: &Item<SerialInterfaceType, Context>,
     _args: &[&str],
-    serial: &mut SerialInterfaceType,
+    mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
     writeln!(serial, "\nTraffic Settings:").unwrap();
