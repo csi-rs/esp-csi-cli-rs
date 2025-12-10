@@ -40,9 +40,6 @@ esp_app_desc!();
 
 extern crate alloc;
 
-// static CSI_COLLECTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<CSICollector>>> =
-//     Mutex::new(RefCell::new(None));
-
 static USER_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<UserConfig>>> =
     Mutex::new(RefCell::new(None));
 
@@ -198,11 +195,11 @@ const ROOT_MENU: Menu<SerialInterfaceType, Context> = Menu {
                     //     parameter_name: "enable",
                     //     help: Some("Enables Traffic Generation"),
                     // },
-                    Parameter::NamedValue {
-                        parameter_name: "type",
-                        argument_name: "type",
-                        help: Some("Traffic Type"),
-                    },
+                    // Parameter::NamedValue {
+                    //     parameter_name: "type",
+                    //     argument_name: "type",
+                    //     help: Some("Traffic Type"),
+                    // },
                     Parameter::NamedValue {
                         parameter_name: "frequency-hz",
                         argument_name: "frequency-hz",
@@ -218,7 +215,7 @@ Usage:
   set-traffic [OPTIONS]
 
 Options:
-  --frequency-hz=<NUMBER>      Specify the traffic frequencey in Hz (default: 0).
+  --frequency-hz=<NUMBER>      Specify the traffic frecuency in Hz (default: 0).
 
 Examples:
   set-traffic --frequency-hz=10
@@ -895,41 +892,7 @@ fn set_traffic<'a>(
     mut serial: &mut SerialInterfaceType,
     _context: &mut Context,
 ) {
-    // let traffic_en = argument_finder(item, args, "enable");
     let traffic_interval = argument_finder(item, args, "frequency-hz");
-
-    // match traffic_en {
-    //     Ok(_str) => CSI_COLLECTOR.lock(|config| {
-    //         config.borrow_mut().as_mut().unwrap().traffic_enabled = true;
-    //     }),
-    //     Err(_) => (),
-    // }
-    // match traffic_type {
-    //     Ok(str) => {
-    //         if str.is_some() {
-    //             match str.unwrap() {
-    //                 "icmp" => CSI_ACCESSPOINT.lock(|config| {
-    //                     config
-    //                         .borrow_mut()
-    //                         .as_mut()
-    //                         .unwrap()
-    //                         .op_mode
-    //                         .traffic_type = TrafficType::ICMPPing;
-    //                 }),
-    //                 "udp" => CSI_COLLECTOR.lock(|config| {
-    //                     config
-    //                         .borrow_mut()
-    //                         .as_mut()
-    //                         .unwrap()
-    //                         .traffic_config
-    //                         .traffic_type = TrafficType::UDP;
-    //                 }),
-    //                 _ => writeln!(serial, "Invalid Traffic Type").unwrap(),
-    //             }
-    //         }
-    //     }
-    //     Err(_) => (),
-    // }
 
     match traffic_interval {
         Ok(str) => {
