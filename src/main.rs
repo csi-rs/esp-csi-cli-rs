@@ -4,7 +4,9 @@
 mod cli;
 mod config;
 
-use cli::{is_jtag, Context, SerialInterface, ROOT_MENU};
+#[cfg(not(feature = "esp32"))]
+use cli::is_jtag;
+use cli::{Context, SerialInterface, ROOT_MENU};
 use embassy_executor::Spawner;
 use core::sync::atomic::Ordering;
 use embassy_futures::join::join;
@@ -34,15 +36,24 @@ use alloc::string::ToString;
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
 
+/// WiFi/radio operating mode selected by the user via `set-wifi --mode`.
+///
+/// This determines how the underlying [`esp_csi_rs::CSINode`] is constructed
+/// and which `esp-radio` interfaces are activated during a collection run.
 #[derive(Debug, Clone)]
 enum NodeMode {
+    /// Passively monitors all WiFi traffic on the configured channel.
     WifiSniffer,
+    /// Connects to an existing WiFi network as a station.
     WifiStation,
+    /// Acts as the central (initiating) device in an ESP-NOW pair.
     EspNowCentral,
+    /// Acts as the peripheral (responding) device in an ESP-NOW pair.
     EspNowPeripheral,
 }
 
-// When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
+/// Helper macro that stores a value in a static [`static_cell::StaticCell`] and returns
+/// a `&'static mut` reference to it. Required to pass owned peripherals into Embassy tasks.
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -188,6 +199,18 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
+/// Background Embassy task responsible for driving CSI data collection.
+///
+/// # Lifecycle
+/// 1. Waits on [`START_SIGNAL`] for a `Option<u64>` duration sent by the CLI `start` command.
+/// 2. Snapshots [`USER_CONFIG`] to get the current node settings.
+/// 3. Constructs and runs a [`CSINode`] according to those settings.
+///    - `Some(secs)` → [`CSINode::run_duration`] (prints internally).
+///    - `None` → [`CSINode::run`] joined with a continuous print loop.
+/// 4. Signals [`DONE_SIGNAL`] to unlock the CLI in the main loop.
+///
+/// This task runs for the lifetime of the application and restarts the cycle
+/// on every subsequent `start` command.
 async fn csi_collection(
     mut interfaces: Interfaces<'static>,
     controller: &'static mut WifiController<'static>,

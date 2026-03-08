@@ -17,9 +17,11 @@ In order to use this crate, you would need to flash the source code for your tar
 
 ## Features
 
-* **Multiple Wi-Fi Modes:** Configure the ESP device as an Access Point (AP), Station (STA), AP+STA, or Sniffer.
+* **Multiple Wi-Fi Modes:** Configure the ESP device as a Station, Sniffer, ESP-NOW Central, or ESP-NOW Peripheral.
 * **Traffic Generation:** Generate traffic at configurable intervals.
 * **Fine-grained CSI Control:** Enable or disable specific CSI features like LLTF, HTLTF, STBC HTLTF, and LTF Merge.
+* **Collection Mode:** Switch the node between Collector and Listener roles at runtime.
+* **Flexible Log Format:** Choose between human-readable text, compact array-list, or binary serialized output.
 * **CLI Control:** Interact with the device using simple commands over a serial connection.
 * **Configuration Management:** Show the current configuration or reset to defaults.
 * **Timed Collection:** Start CSI collection for a specific duration or run indefinitely.
@@ -75,48 +77,78 @@ In order to use this crate, you would need to flash the source code for your tar
 ## CLI Commands
 
 This is a list of commands available through the CLI interface:
-> 📝 The `set-csi` commands for the ESP32-C6 will be different.
+> 📝 The `set-csi` command options differ for the ESP32-C6.
 
 * **`help [command]`**
     * Description: Display the main help menu or details for a specific command.
     * Example: `help set-wifi`
 
 * **`set-traffic [OPTIONS]`**
-    * Description: Configure traffic-related parameters.
+    * Description: Configure traffic generation parameters.
     * Options:
-        * `--frequency-hz=<NUMBER>`: Specify the traffic frequency in Hertz (default: 0).
+        * `--frequency-hz=<NUMBER>`: Specify the traffic frequency in Hertz (default: 100). Set to `0` to disable traffic generation.
     * Examples:
         * `set-traffic --frequency-hz=10`
+        * `set-traffic --frequency-hz=0`
+
+* **`set-collection-mode [OPTIONS]`**
+    * Description: Set the CSI node collection role.
+    * Options:
+        * `--mode=<collector|listener>`: `collector` actively generates and collects CSI data (default). `listener` passively receives CSI data only.
+    * Examples:
+        * `set-collection-mode --mode=collector`
+        * `set-collection-mode --mode=listener`
+
+* **`set-log-mode [OPTIONS]`**
+    * Description: Set the CSI output logging format at runtime.
+    * Options:
+        * `--mode=<text|array-list|serialized>`: Output format for CSI packets (default: `text`).
+            * `text`: Verbose human-readable output with full metadata.
+            * `array-list`: Compact CSV-style array, one line per packet — best for host-side data processing.
+            * `serialized`: Binary COBS-framed postcard format — most compact, requires a compatible deserializer on the host.
+    * Examples:
+        * `set-log-mode --mode=text`
+        * `set-log-mode --mode=array-list`
+        * `set-log-mode --mode=serialized`
 
 * **`set-csi [OPTIONS]`**
     * Description: Configure CSI feature flags.
-    * Options:
+    * Options (non-ESP32-C6):
         * `--disable-lltf`: Disable LLTF CSI (default: enabled).
         * `--disable-htltf`: Disable HTLTF CSI (default: enabled).
         * `--disable-stbc-htltf`: Disable STBC HTLTF CSI (default: enabled).
         * `--disable-ltf-merge`: Disable LTF Merge CSI (default: enabled).
+    * Options (ESP32-C6):
+        * `--disable-csi`: Disable acquisition of CSI entirely.
+        * `--disable-csi-legacy`: Disable L-LTF acquisition for 11g PPDUs.
+        * `--disable-csi-ht20`: Disable HT-LTF for HT20 PPDUs.
+        * `--disable-csi-ht40`: Disable HT-LTF for HT40 PPDUs.
+        * `--disable-csi-su`: Disable HE-LTF for HE20 SU PPDUs.
+        * `--disable-csi-mu`: Disable HE-LTF for HE20 MU PPDUs.
+        * `--disable-csi-dcm`: Disable HE-LTF for HE20 DCM PPDUs.
+        * `--disable-csi-beamformed`: Disable HE-LTF for HE20 Beamformed PPDUs.
+        * `--csi-he-stbc=<0-2>`: STBC HE LTF selection (default: 2).
+        * `--val-scale-cfg=<0-3>`: Value scale configuration (default: 2).
     * Examples:
         * `set-csi --disable-lltf --disable-ltf-merge`
-        * `set-csi --disable-htltf`
+        * `set-csi --disable-csi-legacy --csi-he-stbc=1`
 
 * **`set-wifi [OPTIONS]`**
-    * Description: Configure WiFi settings. **Note:** Replace spaces in SSIDs or Passwords with underscores (`_`).
+    * Description: Configure WiFi and network settings. **Note:** Replace spaces in SSIDs or passwords with underscores (`_`).
     * Options:
-        * `--mode=<ap|station|sniffer|ap-station>`: Specify WiFi operation mode (default: sniffer).
-        * `--max-connections=<NUMBER>`: Set the maximum number of AP connections (default: 1).
-        * `--hide-ssid`: Hide the SSID for the AP (default: visible).
-        * `--ap-ssid=<SSID>`: Set the SSID for the AP.
-        * `--ap-password=<PASSWORD>`: Set the password for the AP.
-        * `--sta-ssid=<SSID>`: Set the SSID for the station.
-        * `--sta-password=<PASSWORD>`: Set the password for the station.
+        * `--mode=<station|sniffer|esp-now-central|esp-now-peripheral>`: Specify WiFi operation mode (default: `sniffer`).
+        * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
+        * `--sta-password=<PASSWORD>`: Set the password for Station mode.
+        * `--set-channel=<NUMBER>`: Set the WiFi channel (default: 1).
     * Examples:
-        * `set-wifi --mode ap --max-connections 5 --hide-ssid --ap-ssid=My_ESP_AP --ap-password=secret_pass`
-        * `set-wifi --mode station --sta-ssid=My_Home_Network --sta-password=my_wifi_key`
+        * `set-wifi --mode=sniffer --set-channel=6`
+        * `set-wifi --mode=station --sta-ssid=My_Network --sta-password=my_password`
+        * `set-wifi --mode=esp-now-central`
 
 * **`start [OPTIONS]`**
     * Description: Start the CSI collection process. Ensure the device is configured first.
     * Options:
-        * `--duration=<SECONDS>`: Specify the duration (in seconds) for CSI collection. If omitted, collection runs indefinitely (or technically, for about a week).
+        * `--duration=<SECONDS>`: Specify the duration in seconds. If omitted, collection runs indefinitely.
     * Examples:
         * `start`
         * `start --duration=120`
@@ -131,31 +163,36 @@ This is a list of commands available through the CLI interface:
 
 ## CLI Configuration Examples
 
-1.  **Configure an ESP as an AP that generates traffic to connecting stations and start collecting for 5 minutes:**
+1.  **Configure an ESP as a WiFi Sniffer on channel 6 and collect indefinitely in array-list format:**
     ```
-    set-wifi --mode ap
-    set-wifi --ap-ssid=ESP_CSI_AP 
-    set-wifi --ap-password=testing123
+    set-wifi --mode=sniffer --set-channel=6
+    set-log-mode --mode=array-list
+    show-config
+    start
+    ```
+
+2.  **Configure an ESP as a Station connected to an existing network and collect for 5 minutes:**
+    ```
+    set-wifi --mode=station --sta-ssid=My_Router --sta-password=router_password
     set-traffic --frequency-hz=20
     show-config
     start --duration=300
     ```
 
-2.  **Configure an ESP as a Station Monitor connected to an existing network, disable some CSI features, and start collecting indefinitely:**
+3.  **Configure an ESP as an ESP-NOW Central node in listener mode and collect for 2 minutes:**
     ```
-    set-wifi --mode station 
-    set-wifi --sta-ssid=My_Router
-    set-wifi --sta-password=router_password
-    set-csi --disable-htltf --disable-stbc-htltf
+    set-wifi --mode=esp-now-central
+    set-collection-mode --mode=listener
+    set-log-mode --mode=array-list
     show-config
-    start
+    start --duration=120
     ```
 
 ## Important Notes
 
 > 🛑 SSIDs and passwords containing spaces must have the spaces replaced with underscores (`_`) when using the `set-wifi` command. The application will convert them back internally.
 
-> 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise the application will `panic` as the station wont habe an AP to connect to.
+> 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise the application will `panic` as the station won't have an AP to connect to.
 
 ## Building From Source (Optional)
 Rather than downloading pre-built binaries, another approach is to clone the repository and build the source. This would require some additional dependencies and modifications depending on the device you are using.
@@ -210,7 +247,7 @@ This CLI is built around the esp-csi-rs crate. You can find full documentation f
 This crate is still in early development and currently supports `no-std` only. Contributions and suggestions are welcome!
 
 ## License
-Copyright 2025 The Embedded Rustacean
+Copyright 2026 The Embedded Rustacean
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

@@ -1,21 +1,32 @@
 use esp_hal::uart::Uart;
+#[cfg(not(feature = "esp32"))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Async;
 
+/// Serial interface type used by the CLI runner on ESP32 targets.
+///
+/// On ESP32, the USB-serial-JTAG peripheral is not available, so UART0 is always used.
 #[cfg(feature = "esp32")]
 pub type SerialInterface<'d> = Uart<'d, Async>;
 
-// Not ESP32, no auto, and jtag-serial is explicitly requested
+/// Serial interface type used when `jtag-serial` is explicitly requested (non-ESP32).
 #[cfg(all(not(feature = "esp32"), not(feature = "auto"), feature = "jtag-serial"))]
 pub type SerialInterface<'d> = UsbSerialJtag<'d, Async>;
 
-// Not ESP32, no auto, and jtag-serial is NOT requested (fallback to UART)
+/// Serial interface type used when UART is explicitly requested (non-ESP32, no auto-detect).
 #[cfg(all(not(feature = "esp32"), not(feature = "auto"), feature = "uart"))]
 pub type SerialInterface<'d> = Uart<'d, Async>;
 
+/// Runtime-selectable serial interface for targets that support both UART and USB-JTAG.
+///
+/// When the `auto` feature is enabled the correct backend is chosen at runtime by
+/// [`is_jtag`]: if a USB host is detected the JTAG peripheral is used, otherwise
+/// UART0 is used as a fallback.
 #[cfg(all(not(feature = "esp32"), feature = "auto"))]
 pub enum SerialInterface<'d> {
+    /// USB Serial JTAG backend (faster, preferred when a USB host is present).
     UsbJtag(UsbSerialJtag<'d, Async>),
+    /// UART0 backend (fallback when no USB host is detected).
     Uart(Uart<'d, Async>),
 }
 
@@ -67,6 +78,19 @@ impl<'d> embedded_io::Write for SerialInterface<'d> {
     }
 }
 
+/// Detects at runtime whether a USB host is connected to the USB-Serial-JTAG peripheral.
+///
+/// Reads the `SOF_INT` bit from the device's `USB_DEVICE_INT_RAW` register.
+/// A set bit means the USB host has sent a Start-Of-Frame packet, indicating
+/// an active connection. This is used by the `auto` feature to choose between
+/// the JTAG and UART backends without requiring a compile-time decision.
+///
+/// # Safety
+/// Performs a raw memory-mapped register read. The address constants are
+/// chip-specific and are selected via Cargo features at compile time.
+///
+/// Not available on ESP32 which has no USB-Serial-JTAG peripheral.
+#[cfg(not(feature = "esp32"))]
 pub fn is_jtag() -> bool {
     #[cfg(feature = "esp32c3")]
     const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
