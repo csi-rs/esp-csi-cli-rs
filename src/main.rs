@@ -4,52 +4,35 @@
 mod cli;
 mod config;
 
-use alloc::string::ToString;
 use cli::{is_jtag, Context, SerialInterface, ROOT_MENU};
-use esp_csi_rs::CentralOpMode;
-use esp_csi_rs::WifiStationConfig;
-use core::cell::RefCell;
-use core::fmt::Write;
-use core::u64;
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::signal::Signal;
-use embassy_time::with_timeout;
-use embassy_time::Duration;
-use embassy_time::Timer;
+use core::sync::atomic::Ordering;
+use embassy_futures::join::join;
+use embassy_futures::select::{select, Either};
+use embedded_io::Write;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::config::CsiConfig;
-use esp_csi_rs::CollectionMode;
-use esp_csi_rs::Node;
-use esp_csi_rs::PeripheralOpMode;
-use esp_csi_rs::WifiSnifferConfig;
-use esp_hal::peripherals::Peripherals;
+use esp_csi_rs::logging::logging::{init_logger, LogMode};
+use esp_csi_rs::{
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node,
+    PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,
+};
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(any(feature = "esp32", feature = "auto"))]
-use esp_hal::uart::{Config, Uart};
+use esp_hal::uart::Uart;
 #[cfg(not(feature = "esp32"))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use esp_hal::Async;
-use esp_println::print;
-use esp_println::println;
-use esp_radio::wifi::Interfaces;
-use esp_radio::wifi::WifiController;
-use heapless::String;
+use esp_radio::wifi::{AuthMethod, ClientConfig, Interfaces, WifiController};
 use menu::*;
-
-use crate::config::UserConfig;
+use crate::config::{DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig};
 
 esp_app_desc!();
 
 extern crate alloc;
+use alloc::string::ToString;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
-
-// static CSI_COLLECTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<CSICollector>>> =
-//     Mutex::new(RefCell::new(None));
 
 #[derive(Debug, Clone)]
 enum NodeMode {
@@ -58,8 +41,6 @@ enum NodeMode {
     EspNowCentral,
     EspNowPeripheral,
 }
-
-static START_SIGNAL: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
 
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
 macro_rules! mk_static {
@@ -98,7 +79,7 @@ async fn main(spawner: Spawner) {
 
     let mut config_radio = esp_radio::wifi::Config::default();
     config_radio = config_radio.with_power_save_mode(esp_radio::wifi::PowerSaveMode::None);
-    let (wifi_controller, mut interfaces) =
+    let (wifi_controller, interfaces) =
         esp_radio::wifi::new(radio_init, peripherals.WIFI, config_radio)
             .expect("Failed to initialize Wi-Fi controller");
 
@@ -112,7 +93,11 @@ async fn main(spawner: Spawner) {
         config.replace(Some(user_config));
     });
 
-    // Spawn the CSI Collection Task (TODO)
+    // Initialize the CSI data logger
+    init_logger(spawner, LogMode::ArrayList);
+
+    // Spawn the CSI Collection Task
+    spawner.spawn(csi_collection(interfaces, controller)).unwrap();
 
     // Create a buffer to store CLI input
     let mut clibuf = [0u8; 256];
@@ -171,12 +156,110 @@ async fn main(spawner: Spawner) {
     let mut runner = Runner::new(ROOT_MENU, &mut clibuf, serial, &mut context);
 
     loop {
-        // Create single element buffer for serial characters
         let mut buf = [0_u8; 1];
-        embedded_io_async::Read::read(&mut runner.interface, &mut buf)
-            .await
-            .unwrap();
-        // Pass read byte to CLI runner for processing
-        runner.input_byte(buf[0], &mut context);
+
+        if IS_COLLECTING.load(Ordering::Relaxed) {
+            // Erase the spurious "> " the menu crate printed after the command returned
+            Write::write_all(&mut runner.interface, b"\r\x1b[2K").ok();
+            // CLI locked during collection: discard serial input until DONE_SIGNAL
+            loop {
+                match select(
+                    embedded_io_async::Read::read(&mut runner.interface, &mut buf),
+                    DONE_SIGNAL.wait(),
+                )
+                .await
+                {
+                    Either::First(_) => {} // discard input
+                    Either::Second(_) => break, // collection ended
+                }
+            }
+            IS_COLLECTING.store(false, Ordering::Relaxed);
+            // \r       — move to start of line (overwrites the spurious "> " the menu crate printed)
+            // \x1b[2K  — ANSI: erase the entire current line
+            Write::write_all(&mut runner.interface, b"\r\x1b[2KCollection complete.\r\n> ").ok();
+        } else {
+            // Normal CLI mode
+            embedded_io_async::Read::read(&mut runner.interface, &mut buf)
+                .await
+                .unwrap();
+            runner.input_byte(buf[0], &mut context);
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn csi_collection(
+    mut interfaces: Interfaces<'static>,
+    controller: &'static mut WifiController<'static>,
+) {
+    loop {
+        // Wait for a start signal from the CLI
+        let duration = START_SIGNAL.wait().await;
+        START_SIGNAL.reset();
+
+        // Snapshot the current user configuration
+        let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
+
+        // Map NodeMode → esp-csi-rs Node + operation mode
+        let node_kind = match user_config.node_mode {
+            NodeMode::WifiSniffer => {
+                Node::Peripheral(PeripheralOpMode::WifiSniffer(WifiSnifferConfig::default()))
+            }
+            NodeMode::WifiStation => {
+                let client_config = ClientConfig::default()
+                    .with_ssid(user_config.sta_ssid.as_str().to_string())
+                    .with_password(user_config.sta_password.as_str().to_string())
+                    .with_auth_method(AuthMethod::Wpa2Personal)
+                    .with_channel(user_config.channel);
+                Node::Central(CentralOpMode::WifiStation(WifiStationConfig {
+                    client_config,
+                }))
+            }
+            NodeMode::EspNowCentral => {
+                Node::Central(CentralOpMode::EspNow(EspNowConfig::default()))
+            }
+            NodeMode::EspNowPeripheral => {
+                Node::Peripheral(PeripheralOpMode::EspNow(EspNowConfig::default()))
+            }
+        };
+
+        // Non-zero trigger_freq enables traffic generation
+        let traffic_freq = if user_config.trigger_freq == 0 {
+            None
+        } else {
+            Some(user_config.trigger_freq as u16)
+        };
+
+        // Build hardware handle and construct the CSI node
+        let hardware = CSINodeHardware::new(&mut interfaces, controller);
+        let mut node = CSINode::new(
+            node_kind,
+            user_config.collection_mode,
+            Some(user_config.csi_config),
+            traffic_freq,
+            hardware,
+        );
+
+        // Run for a fixed duration or indefinitely.
+        // run_duration handles printing internally via CSINodeClient.
+        // run() alone only enqueues packets — join it with a print loop.
+        match duration {
+            Some(secs) => {
+                let mut client = CSINodeClient::new();
+                node.run_duration(secs, &mut client).await;
+            }
+            None => {
+                let mut client = CSINodeClient::new();
+                join(node.run(), async {
+                    loop {
+                        client.print_csi_w_metadata().await;
+                    }
+                })
+                .await;
+            }
+        }
+
+        // Unlock the CLI in the main loop
+        DONE_SIGNAL.signal(());
     }
 }

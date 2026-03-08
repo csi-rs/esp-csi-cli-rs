@@ -1,4 +1,3 @@
-use esp_hal::peripherals::Peripherals;
 use esp_hal::uart::Uart;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Async;
