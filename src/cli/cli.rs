@@ -2,6 +2,9 @@ use core::fmt::Write;
 use menu::Menu;
 use crate::cli::{SerialInterface, Context};
 
+/// Called by the `menu` crate whenever the CLI runner enters (or re-enters) the root menu.
+///
+/// Prints the welcome banner and a summary of available commands to the serial interface.
 pub fn enter_root(
     _menu: &Menu<SerialInterface, Context>,
     interface: &mut SerialInterface,
@@ -17,6 +20,7 @@ pub fn enter_root(
     set-wifi                Configure WiFi settings (e.g., mode, SSID visibility).
     set-traffic             Configure traffic-related parameters (e.g. interval).
     set-collection-mode     Set the CSI node collection mode (collector or listener).
+    set-log-mode            Set the CSI output logging format (text, array-list, serialized).
     set-csi                 Configure CSI feature flags (e.g., LLTF, HTLTF).
     start                   Start the CSI collection process with a defined duration.
     show-config             Display the current configuration settings.

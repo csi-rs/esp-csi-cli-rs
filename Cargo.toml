@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [features]
@@ -8,7 +8,7 @@ default = ["no-std", "println", "auto", "async-print"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via `println!()`.
-println = ["esp-csi-rs/println"]
+println = ["esp-csi-rs/println", "esp-backtrace/println"]
 ## Automatically select the best available backend for the target.
 auto = ["esp-csi-rs/auto"]
 ## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
@@ -16,6 +16,7 @@ async-print = ["esp-csi-rs/async-print"]
 ## Enable logging via defmt.
 defmt = [
     "esp-csi-rs/defmt",
+    "esp-backtrace/defmt",
 ]
 ## Force the JTAG backend for logging.
 jtag-serial = ["esp-csi-rs/jtag-serial"]
@@ -51,7 +52,6 @@ esp32s3 = [
 esp-bootloader-esp-idf = "0.4.0"
 esp-backtrace = { version = "0.18.1", features = [
     "panic-handler",
-    "println",
 ] }
 esp-hal = { version = "~1.0", default-features = false, features = [
     "unstable",
@@ -79,7 +79,7 @@ embassy-time = { version = "0.5.0" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.7.0" }
 embassy-futures = { version = "0.1.1" }
-esp-csi-rs = { version = "0.4.0", default-features = false }
+esp-csi-rs = { git = "https://github.com/csi-rs/esp-csi-rs", branch = "minor-fix", default-features = false }
 menu = "0.6.1"
 embedded-io = "0.6.1"
 

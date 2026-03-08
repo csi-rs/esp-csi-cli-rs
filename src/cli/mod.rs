@@ -5,11 +5,15 @@ mod cmds;
 use cli::{enter_root};
 use menu::{Item, ItemType, Menu, Parameter};
 
-#[cfg(feature = "esp32c6")]
-use crate::cli::cmds::set_csi;
-use crate::cli::cmds::{reset_config, set_collection_mode, set_traffic, set_wifi, show_config, start_csi_collect};
-pub use crate::cli::serial::{SerialInterface, is_jtag};
+use crate::cli::cmds::{reset_config, set_collection_mode, set_csi, set_log_mode, set_traffic, set_wifi, show_config, start_csi_collect};
+pub use crate::cli::serial::SerialInterface;
+#[cfg(not(feature = "esp32"))]
+pub use crate::cli::serial::is_jtag;
 
+/// Placeholder context passed through the `menu` crate to every command callback.
+///
+/// Currently unused but required by the [`menu::Runner`] API. It can be extended
+/// in the future to carry session state between commands.
 #[derive(Default)]
 pub struct Context {
     _inner: u32,
@@ -78,6 +82,33 @@ Options:
 Examples:
   set-collection-mode --mode=collector
   set-collection-mode --mode=listener"),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_log_mode,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "mode",
+                        argument_name: "mode",
+                        help: Some("Log mode: 'text', 'array-list', or 'serialized'"),
+                    },
+                ],
+            },
+            command: "set-log-mode",
+            help: Some("set-log-mode - Set the CSI output logging format.
+
+Usage:
+  set-log-mode --mode=<text|array-list|serialized>
+
+Options:
+  --mode=text           Human-readable verbose output with metadata (default).
+  --mode=array-list     Compact CSV-style array output, one line per packet.
+  --mode=serialized     Binary COBS-framed postcard format for host-side parsing.
+
+Examples:
+  set-log-mode --mode=text
+  set-log-mode --mode=array-list
+  set-log-mode --mode=serialized"),
         },
         #[cfg(not(feature = "esp32c6"))]
         &Item {

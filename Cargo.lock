@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-cli-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embassy-executor",
  "embassy-futures",
@@ -738,9 +738,8 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60fe27076a3544b47a8d35f8bb9bcd4121f8121595a42504b9738223d6751070"
+version = "0.4.1"
+source = "git+https://github.com/csi-rs/esp-csi-rs?branch=minor-fix#b2aa273903f632ccba912fe16547dc726b953fe2"
 dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
