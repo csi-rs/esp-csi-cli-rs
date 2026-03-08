@@ -14,13 +14,14 @@ pub fn enter_root(
     interface
         .write_str(
             "Available Commands:
-    set-wifi            Configure WiFi settings (e.g., mode, SSID visibility).
-    set-traffic         Configure traffic-related parameters (e.g. interval).
-    set-csi             Configure CSI feature flags (e.g., LLTF, HTLTF).
-    start               Start the CSI collection process with a defined duration.
-    show-config         Display the current configuration settings.
-    reset-config        Reset all configurations to their default values.
-    help                Display this help menu or details for a specific command.
+    set-wifi                Configure WiFi settings (e.g., mode, SSID visibility).
+    set-traffic             Configure traffic-related parameters (e.g. interval).
+    set-collection-mode     Set the CSI node collection mode (collector or listener).
+    set-csi                 Configure CSI feature flags (e.g., LLTF, HTLTF).
+    start                   Start the CSI collection process with a defined duration.
+    show-config             Display the current configuration settings.
+    reset-config            Reset all configurations to their default values.
+    help                    Display this help menu or details for a specific command.
 
     For more information on a specific command, type:
     help <command>

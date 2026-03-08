@@ -7,7 +7,7 @@ use menu::{Item, ItemType, Menu, Parameter};
 
 #[cfg(feature = "esp32c6")]
 use crate::cli::cmds::set_csi;
-use crate::cli::cmds::{reset_config, set_traffic, set_wifi, show_config};
+use crate::cli::cmds::{reset_config, set_collection_mode, set_traffic, set_wifi, show_config, start_csi_collect};
 pub use crate::cli::serial::{SerialInterface, is_jtag};
 
 #[derive(Default)]
@@ -43,7 +43,7 @@ Usage:
   set-traffic [OPTIONS]
 
 Options:
-  --frequency-hz=<NUMBER>      Specify the traffic frequencey in Hz (default: 0).
+  --frequency-hz=<NUMBER>      Specify the traffic frequencey in Hz (default: 100).
 
 Examples:
   set-traffic --frequency-hz=10
@@ -53,6 +53,31 @@ Description:
   You can enable traffic generation and specify the interval 
   between generated packets. Setting a value of zero disbles traffic generation.",
             ),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_collection_mode,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "mode",
+                        argument_name: "mode",
+                        help: Some("Collection mode: 'collector' or 'listener'"),
+                    },
+                ],
+            },
+            command: "set-collection-mode",
+            help: Some("set-collection-mode - Set the CSI node collection mode.
+
+Usage:
+  set-collection-mode --mode=<collector|listener>
+
+Options:
+  --mode=collector    Act as the node that generates and collects CSI data (default).
+  --mode=listener     Act as a passive listener that only receives CSI data.
+
+Examples:
+  set-collection-mode --mode=collector
+  set-collection-mode --mode=listener"),
         },
         #[cfg(not(feature = "esp32c6"))]
         &Item {

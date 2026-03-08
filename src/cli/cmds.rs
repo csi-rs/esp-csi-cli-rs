@@ -1,9 +1,10 @@
 use core::cell::RefCell;
+use core::sync::atomic::Ordering;
 use embedded_io::Write;
 
 use menu::{Item, Menu, argument_finder};
 
-use crate::{NodeMode, cli::{Context, SerialInterface}, config::{USER_CONFIG, UserConfig}};
+use crate::{NodeMode, cli::{Context, SerialInterface}, config::{IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig}};
 
 pub fn set_traffic<'a>(
     _menu: &Menu<SerialInterface, Context>,
@@ -515,13 +516,137 @@ pub fn set_wifi<'a>(
     });
 }
 
+pub fn start_csi_collect<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let duration = argument_finder(item, args, "duration");
+    let signal_val = match duration {
+        Ok(str) => {
+            if let Some(s) = str {
+                match s.parse::<u64>() {
+                    Ok(secs) => {
+                        writeln!(serial, "Starting CSI collection for {}s...", secs).unwrap();
+                        Some(secs)
+                    }
+                    Err(_) => {
+                        writeln!(serial, "Invalid duration").unwrap();
+                        return;
+                    }
+                }
+            } else {
+                writeln!(serial, "Starting CSI collection indefinitely...").unwrap();
+                None
+            }
+        }
+        Err(_) => {
+            writeln!(serial, "Starting CSI collection indefinitely...").unwrap();
+            None
+        }
+    };
+    IS_COLLECTING.store(true, Ordering::Relaxed);
+    START_SIGNAL.signal(signal_val);
+}
+
+pub fn set_collection_mode<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let mode = argument_finder(item, args, "mode");
+    match mode {
+        Ok(Some(s)) => match s {
+            "collector" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().collection_mode =
+                    esp_csi_rs::CollectionMode::Collector;
+            }),
+            "listener" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().collection_mode =
+                    esp_csi_rs::CollectionMode::Listener;
+            }),
+            _ => {
+                writeln!(serial, "Invalid mode. Use 'collector' or 'listener'.").unwrap();
+                return;
+            }
+        },
+        _ => {
+            writeln!(serial, "Usage: set-collection-mode --mode=<collector|listener>").unwrap();
+            return;
+        }
+    }
+
+    USER_CONFIG.lock(|config| {
+        let mode_str = match config.borrow().as_ref().unwrap().collection_mode {
+            esp_csi_rs::CollectionMode::Collector => "Collector",
+            esp_csi_rs::CollectionMode::Listener => "Listener",
+        };
+        writeln!(serial, "\nCollection Mode: {}", mode_str).unwrap();
+    });
+}
+
 pub fn show_config<'a>(
     _menu: &Menu<SerialInterface, Context>,
     _item: &Item<SerialInterface, Context>,
     _args: &[&str],
-    _serial: &mut SerialInterface,
+    serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
+    USER_CONFIG.lock(|config| {
+        let cfg = config.borrow();
+        let cfg = cfg.as_ref().unwrap();
+
+        writeln!(serial, "\n====== Current Configuration ======\n").unwrap();
+
+        // Node / WiFi settings
+        writeln!(serial, "[WiFi]").unwrap();
+        writeln!(serial, "  Mode    : {:?}", cfg.node_mode).unwrap();
+        writeln!(serial, "  Channel : {}", cfg.channel).unwrap();
+        writeln!(serial, "  STA SSID: '{}'", cfg.sta_ssid).unwrap();
+        writeln!(serial, "  STA Pass: '{}'", cfg.sta_password).unwrap();
+
+        // Collection settings
+        writeln!(serial, "\n[Collection]").unwrap();
+        let mode_str = match cfg.collection_mode {
+            esp_csi_rs::CollectionMode::Collector => "Collector",
+            esp_csi_rs::CollectionMode::Listener => "Listener",
+        };
+        writeln!(serial, "  Mode          : {}", mode_str).unwrap();
+        writeln!(serial, "  Traffic Freq  : {}Hz", cfg.trigger_freq).unwrap();
+
+        // CSI configuration (platform-specific fields)
+        writeln!(serial, "\n[CSI Config]").unwrap();
+        #[cfg(feature = "esp32c6")]
+        {
+            writeln!(serial, "  Acquire CSI        : {}", cfg.csi_config.enable).unwrap();
+            writeln!(serial, "  Legacy (11g)       : {}", cfg.csi_config.acquire_csi_legacy).unwrap();
+            writeln!(serial, "  HT20               : {}", cfg.csi_config.acquire_csi_ht20).unwrap();
+            writeln!(serial, "  HT40               : {}", cfg.csi_config.acquire_csi_ht40).unwrap();
+            writeln!(serial, "  HE20 SU            : {}", cfg.csi_config.acquire_csi_su).unwrap();
+            writeln!(serial, "  HE20 MU            : {}", cfg.csi_config.acquire_csi_mu).unwrap();
+            writeln!(serial, "  HE20 DCM           : {}", cfg.csi_config.acquire_csi_dcm).unwrap();
+            writeln!(serial, "  HE20 Beamformed    : {}", cfg.csi_config.acquire_csi_beamformed).unwrap();
+            writeln!(serial, "  STBC HE            : {}", cfg.csi_config.acquire_csi_he_stbc).unwrap();
+            writeln!(serial, "  Scale Value        : {}", cfg.csi_config.val_scale_cfg).unwrap();
+        }
+        #[cfg(not(feature = "esp32c6"))]
+        {
+            writeln!(serial, "  LLTF Enabled       : {}", cfg.csi_config.lltf_enabled).unwrap();
+            writeln!(serial, "  HTLTF Enabled      : {}", cfg.csi_config.htltf_enabled).unwrap();
+            writeln!(serial, "  STBC HTLTF Enabled : {}", cfg.csi_config.stbc_htltf2_enabled).unwrap();
+            writeln!(serial, "  LTF Merge Enabled  : {}", cfg.csi_config.ltf_merge_enabled).unwrap();
+            writeln!(serial, "  Channel Filter     : {}", cfg.csi_config.channel_filter_en).unwrap();
+            writeln!(serial, "  Manual Scale       : {}", cfg.csi_config.manu_scale).unwrap();
+            writeln!(serial, "  Shift Bits         : {}", cfg.csi_config.shift).unwrap();
+            writeln!(serial, "  Dump ACK           : {}", cfg.csi_config.dump_ack_en).unwrap();
+        }
+
+        writeln!(serial, "\n===================================\n").unwrap();
+    });
 }
 
 pub fn reset_config<'a>(
