@@ -17,7 +17,7 @@ pub fn enter_root(
     interface
         .write_str(
             "Available Commands:
-    set-wifi                Configure WiFi settings (e.g., mode, SSID visibility).
+    set-wifi                Configure WiFi settings (e.g., mode).
     set-traffic             Configure traffic-related parameters (e.g. interval).
     set-collection-mode     Set the CSI node collection mode (collector or listener).
     set-log-mode            Set the CSI output logging format (text, array-list, serialized).
