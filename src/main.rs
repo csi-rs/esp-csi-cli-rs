@@ -4,11 +4,12 @@
 mod cli;
 mod config;
 
+use crate::config::{UserConfig, DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, USER_CONFIG};
 #[cfg(not(feature = "esp32"))]
 use cli::is_jtag;
 use cli::{Context, SerialInterface, ROOT_MENU};
-use embassy_executor::Spawner;
 use core::sync::atomic::Ordering;
+use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
 use embedded_io::Write;
@@ -16,17 +17,16 @@ use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::logging::logging::{init_logger, LogMode};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node,
-    PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node, PeripheralOpMode,
+    WifiSnifferConfig, WifiStationConfig,
 };
 use esp_hal::timer::timg::TimerGroup;
-#[cfg(any(feature = "esp32", feature = "auto"))]
+#[cfg(any(feature = "auto", feature = "uart"))]
 use esp_hal::uart::Uart;
-#[cfg(not(feature = "esp32"))]
+#[cfg(any(feature = "auto", feature = "jtag-serial"))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::wifi::{AuthMethod, ClientConfig, Interfaces, WifiController};
 use menu::*;
-use crate::config::{DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig};
 
 esp_app_desc!();
 
@@ -108,7 +108,9 @@ async fn main(spawner: Spawner) {
     init_logger(spawner, LogMode::ArrayList);
 
     // Spawn the CSI Collection Task
-    spawner.spawn(csi_collection(interfaces, controller)).unwrap();
+    spawner
+        .spawn(csi_collection(interfaces, controller))
+        .unwrap();
 
     // Create a buffer to store CLI input
     let mut clibuf = [0u8; 256];
@@ -121,44 +123,45 @@ async fn main(spawner: Spawner) {
         {
             Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
                 .unwrap()
-                .with_tx(peripherals.GPIO1)
-                .with_rx(peripherals.GPIO3)
                 .into_async()
         }
 
         // Forced JTAG
-        #[cfg(all(not(feature = "esp32"), not(feature = "auto"), feature = "jtag-serial"))]
+        #[cfg(feature = "jtag-serial")]
         {
             UsbSerialJtag::new(peripherals.USB_DEVICE).into_async()
         }
 
         // Forced UART
-        #[cfg(all(
-            not(feature = "esp32"),
-            not(feature = "auto"),
-            not(feature = "jtag-serial")
-        ))]
+        #[cfg(feature = "uart")]
         {
             Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
                 .unwrap()
-                .with_tx(peripherals.GPIO1) // Adjust pins as needed
-                .with_rx(peripherals.GPIO3)
                 .into_async()
         }
 
         // Runtime Auto-Detection
         #[cfg(all(not(feature = "esp32"), feature = "auto"))]
         {
-            if is_jtag() {
-                SerialInterface::UsbJtag(UsbSerialJtag::new(peripherals.USB_DEVICE).into_async())
-            } else {
-                SerialInterface::Uart(
-                    Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
-                        .unwrap()
-                        .with_tx(peripherals.GPIO1) // Adjust pins as needed
-                        .with_rx(peripherals.GPIO3)
-                        .into_async(),
-                )
+            #[cfg(feature = "esp32")]
+            {
+                Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
+                    .unwrap()
+                    .into_async()
+            }
+            #[cfg(not(feature = "esp32"))]
+            {
+                if is_jtag() {
+                    SerialInterface::UsbJtag(
+                        UsbSerialJtag::new(peripherals.USB_DEVICE).into_async(),
+                    )
+                } else {
+                    SerialInterface::Uart(
+                        Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
+                            .unwrap()
+                            .into_async(),
+                    )
+                }
             }
         }
     };
@@ -180,14 +183,18 @@ async fn main(spawner: Spawner) {
                 )
                 .await
                 {
-                    Either::First(_) => {} // discard input
+                    Either::First(_) => {}      // discard input
                     Either::Second(_) => break, // collection ended
                 }
             }
             IS_COLLECTING.store(false, Ordering::Relaxed);
             // \r       — move to start of line (overwrites the spurious "> " the menu crate printed)
             // \x1b[2K  — ANSI: erase the entire current line
-            Write::write_all(&mut runner.interface, b"\r\x1b[2KCollection complete.\r\n> ").ok();
+            Write::write_all(
+                &mut runner.interface,
+                b"\r\x1b[2KCollection complete.\r\n> ",
+            )
+            .ok();
         } else {
             // Normal CLI mode
             embedded_io_async::Read::read(&mut runner.interface, &mut buf)

@@ -90,7 +90,7 @@ impl<'d> embedded_io::Write for SerialInterface<'d> {
 /// chip-specific and are selected via Cargo features at compile time.
 ///
 /// Not available on ESP32 which has no USB-Serial-JTAG peripheral.
-#[cfg(not(feature = "esp32"))]
+#[cfg(all(not(feature = "esp32"), feature = "auto"))]
 pub fn is_jtag() -> bool {
     #[cfg(feature = "esp32c3")]
     const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
