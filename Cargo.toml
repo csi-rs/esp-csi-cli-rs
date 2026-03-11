@@ -79,7 +79,7 @@ embassy-time = { version = "0.5.0" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.7.0" }
 embassy-futures = { version = "0.1.1" }
-esp-csi-rs = { git = "https://github.com/csi-rs/esp-csi-rs", branch = "minor-fix", default-features = false }
+esp-csi-rs = { version = "0.4.1", default-features = false }
 menu = "0.6.1"
 embedded-io = "0.6.1"
 
