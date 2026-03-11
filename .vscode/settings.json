@@ -3,4 +3,12 @@
     "rust-analyzer.cargo.extraEnv": {
         "RUSTUP_TOOLCHAIN": "esp"
     },
+    "rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf",
+    "rust-analyzer.cargo.features": [
+        "no-std",
+        "println",
+        "auto",
+        "esp32c6"
+    ],
+    "rust-analyzer.cargo.noDefaultFeatures": true
 }

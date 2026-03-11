@@ -1,114 +1,100 @@
 [package]
-name = "csi-csi-cli-rs"
-version = "0.1.0"
+name = "esp-csi-cli-rs"
+version = "0.2.0"
 edition = "2021"
 
 [features]
-default = []
-esp32 = [
-    "esp-hal/esp32",
-    "esp-backtrace/esp32",
-    "esp-println/esp32",
-    "esp-println/auto",
-    "esp-println/critical-section",
-    "esp-wifi/esp32",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32",
-    "esp-csi-rs/esp32",
-    "esp-csi-rs/no-std",
-]
-esp32c3 = [
-    "esp-hal/esp32c3",
-    "esp-backtrace/esp32c3",
-    "esp-wifi/esp32c3",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32c3",
-    "esp-println/esp32c3",
-    "esp-csi-rs/jtag-serial",
-    "esp-println/critical-section",
-    "esp-csi-rs/esp32c3",
-    "esp-csi-rs/no-std",
-]
-esp32c6 = [
-    "esp-hal/esp32c6",
-    "esp-backtrace/esp32c6",
-    "esp-wifi/esp32c6",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32c6",
-    "esp-println/esp32c6",
-    "esp-println/jtag-serial",
-    "esp-println/critical-section",
-    "esp-csi-rs/esp32c6",
-    "esp-csi-rs/no-std",
-]
-esp32s3 = [
-    "esp-hal/esp32s3",
-    "esp-backtrace/esp32s3",
-    "esp-wifi/esp32s3",
-    "esp-wifi/csi",
-    "esp-wifi/sniffer",
-    "esp-hal-embassy/esp32s3",
-    "esp-println/esp32s3",
-    "esp-println/jtag-serial",
-    "esp-println/critical-section",
-    "esp-csi-rs/esp32s3",
-    "esp-csi-rs/no-std",
-]
-
+default = ["no-std", "println", "auto", "async-print"]
+## Build without the standard library.
+no-std = []
+## Enable logging via `println!()`.
+println = ["esp-csi-rs/println", "esp-backtrace/println"]
+## Automatically select the best available backend for the target.
+auto = ["esp-csi-rs/auto"]
+## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
+async-print = ["esp-csi-rs/async-print"]
 ## Enable logging via defmt.
 defmt = [
-    "dep:defmt",
-    "dep:defmt-rtt",
-    "esp-hal/defmt",
-    "esp-wifi/defmt",
-    "esp-backtrace/defmt",
-    "embassy-executor/defmt",
-    "esp-println/defmt-espflash",
     "esp-csi-rs/defmt",
+    "esp-backtrace/defmt",
 ]
-## Enable logging via `println!()` instead of defmt.
-println = ["esp-backtrace/println", "esp-csi-rs/println"]
+## Force the JTAG backend for logging.
+jtag-serial = ["esp-csi-rs/jtag-serial"]
+## Force the UART backend for logging (not recommended, much slower than JTAG backend).
+uart = ["esp-csi-rs/uart"]
+
+## Support for the ESP32
+esp32 = [
+    "esp-csi-rs/esp32"
+]
+
+## Support for the ESP32-C2
+esp32c2 = [
+    "esp-csi-rs/esp32c2"
+]
+
+## Support for the ESP32-C3
+esp32c3 = [
+    "esp-csi-rs/esp32c3"
+]
+
+## Support for the ESP32-C6 (WiFi 6)
+esp32c6 = [
+    "esp-csi-rs/esp32c6"
+]
+
+## Support for the ESP32-S3 (AIoT)
+esp32s3 = [
+    "esp-csi-rs/esp32s3"
+]
 
 [dependencies]
-esp-bootloader-esp-idf = "0.2.0"
-esp-hal-embassy = { version = "0.9.0", default-features = false }
-esp-backtrace = { version = "0.17.0", features = [
-    "exception-handler",
+esp-bootloader-esp-idf = "0.4.0"
+esp-backtrace = { version = "0.18.1", features = [
     "panic-handler",
 ] }
-esp-hal = { version = "1.0.0-rc.0", default-features = false, features = [
+esp-hal = { version = "~1.0", default-features = false, features = [
     "unstable",
 ] }
-esp-println = { version = "0.15.0", default-features = false }
-esp-alloc = { version = "0.8.0" }
-embedded-io-async = "0.6.1"
-esp-wifi = { version = "0.15.0", default-features = false, features = [
-    "wifi",
+esp-rtos = { version = "0.2.0", optional = false, features = [
+    "embassy",
     "esp-alloc",
+    "esp-radio",
 ] }
-heapless = { version = "0.9.1", default-features = false }
-embassy-executor = { version = "0.7.0", features = ["task-arena-size-32768"] }
-embassy-time = { version = "0.4.0", features = ["generic-queue-8"] }
-static_cell = { version = "2.1.0", features = ["nightly"] }
+esp-println = { version = "0.16.1", default-features = false }
+esp-alloc = { version = "0.9.0" }
+embedded-io-async = "0.6.1"
+esp-radio = { version = "0.17.0", default-features = false, optional = false, features = [
+    "wifi",
+    "sniffer",
+    "esp-alloc",
+    "smoltcp",
+    "unstable",
+    "esp-now",
+    "csi",
+] }
+heapless = { version = "0.7", default-features = false }
+embassy-executor = { version = "0.9.1" }
+embassy-time = { version = "0.5.0" }
+static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.7.0" }
-esp-csi-rs = { version = "0.3.0", default-features = false }
+embassy-futures = { version = "0.1.1" }
+esp-csi-rs = { version = "0.4.1", default-features = false }
 menu = "0.6.1"
-defmt = { version = "1.0.1", optional = true }
-defmt-rtt = { version = "1.0.0", optional = true }
+embedded-io = "0.6.1"
 
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
+incremental = true
+debug = 2
 opt-level = "s"
 
 [profile.release]
 codegen-units = 1        # LLVM can perform better optimizations using a single thread
-debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
-opt-level = 's'
+opt-level = "s"
 overflow-checks = false
+panic = "abort"
