@@ -28,51 +28,68 @@ In order to use this crate, you would need to flash the source code for your tar
 * **Flexible Logging:** Supports standard `println!` or the more efficient `defmt` logging.
 
 
-## Minimum Requirements
+## Requirements
 
-* **Hardware:** An ESP development board (e.g., ESP32-C3, ESP32-S3, ESP32...etc.).
-* **Software:** A tool to flash binaries and a tool to monitor output. It is recommended to use `espflash` as it supports both. Additionally, `espflash` supports `defmt` log interpretation. Installation instructions are available [here](https://docs.esp-rs.org/book/tooling/espflash.html). 
-
-> ‼️ Installing `espflash` requires a Rust installation. If you don't have Rust installed, follow the instructions on the [rustup](https://rustup.rs/) website.
+* **Hardware:** An ESP development board (ESP32, ESP32-C3, ESP32-C6, or ESP32-S3).
+* **Rust** with ESP target support — full setup guide available [here](https://docs.esp-rs.org/book/installation/index.html).
+* **`espflash`** for flashing and monitoring — installation instructions available [here](https://docs.esp-rs.org/book/tooling/espflash.html). `espflash` also supports `defmt` log decoding out of the box.
 
 ## Usage
 
-1.  **Download Binary:** Navigate to the /binaries folder in the repository and identify the correct binary .elf file for your ESP chip. There are binaries supporting both regular `println` logging and the more efficient `defmt` loggging. Here are the file names for the different devices:
-
-<div align="center">
-
-| Target Board           | Binary Filename                              |
-|------------------------|----------------------------------------------|
-| ESP32-C3               | `esp-csi-cli-rs-esp32c3.elf`                 |
-| ESP32-C3 (defmt)       | `esp-csi-cli-rs-esp32c3-defmt.elf`           |
-| ESP32-C6               | `esp-csi-cli-rs-esp32c6.elf`                 |
-| ESP32-C6 (defmt)       | `esp-csi-cli-rs-esp32c6-defmt.elf`           |
-| ESP32-S3               | `esp-csi-cli-rs-esp32s3.elf`                 |
-| ESP32-S3 (defmt)       | `esp-csi-cli-rs-esp32s3-defmt.elf`           |
-| ESP32                  | `esp-csi-cli-rs-esp32.elf`                   |
-| ESP32 (defmt)          | `esp-csi-cli-rs-esp32-defmt.elf`             |
-
-</div>
-
-> 📝 Using `defmt` binaries requires that you use a serial monitoring tool capable of interpreting `defmt` encoding such as `espflash`. If you do not, typically you would observe weird characters appear on the monitoring output.
-
-2.  **Flash:** Connect to your ESP device over USB and use `espflash` to flash the downloaded binary to your ESP by running the following command:
+1.  **Clone the repository:**
     ```bash
-    espflash flash [path to downloaded .elf binary]
+    git clone https://github.com/csi-rs/esp-csi-cli-rs
+    cd esp-csi-cli-rs
     ```
-3.  **Monitor & Interact with CLI:** Use `espflash` to connect to and interact with your device by running either of the commands below. If you are using a file with a `defmt` extension note that you'll need to pass the same .elf file from step 2 to the monitor.
+
+2.  **Build & Flash** using the provided Cargo aliases — one command builds, flashes, and opens the monitor:
+
+    | Device   | Command           |
+    |----------|-------------------|
+    | ESP32    | `cargo esp32`     |
+    | ESP32-C3 | `cargo esp32c3`   |
+    | ESP32-C6 | `cargo esp32c6`   |
+    | ESP32-S3 | `cargo esp32s3`   |
+
+    To build without flashing, use the `-build` variants: `cargo esp32c6-build`, `cargo esp32s3-build`, etc.
+
+    > 📝 The aliases default to `println` logging. To use `defmt` instead, uncomment the `defmt` runner and linker flag lines in `.cargo/config.toml` for your target before running the alias. See [Enabling `defmt` Logging](#enabling-logging-w-defmt) for details.
+
+    **Custom builds** — if you need finer control over features, you can invoke `cargo build` directly. The full set of available features is:
+
+    | Feature       | Description                                                          |
+    |---------------|----------------------------------------------------------------------|
+    | `esp32`       | Target: ESP32                                                        |
+    | `esp32c3`     | Target: ESP32-C3                                                     |
+    | `esp32c6`     | Target: ESP32-C6 (WiFi 6)                                           |
+    | `esp32s3`     | Target: ESP32-S3                                                     |
+    | `println`     | Log via `println!` (default)                                         |
+    | `defmt`       | Log via `defmt` (efficient binary logging)                           |
+    | `auto`        | Auto-select JTAG or UART backend at runtime (default)                |
+    | `async-print` | Non-blocking async logging — unstable, use with caution (default)    |
+    | `jtag-serial` | Force JTAG serial backend                                            |
+    | `uart`        | Force UART backend                                                   |
+
     ```bash
-    # Example w/o defmt
-    espflash --monitor
-
-    # Example w/ defmt
-    espflash --monitor -—elf [path to attached file] -—log-format defmt 
+    # Example: ESP32-C6 with defmt, forced JTAG backend
+    cargo build --no-default-features --features "no-std,esp32c6,defmt,jtag-serial" \
+        --target riscv32imac-unknown-none-elf --release
     ```
-> 📝 When logging over `defmt` the monitor requires the original binary to be able to decode the incoming characters.
 
-> 🛑 Step 2 needs only to be performed once. If you disconnect the ESP device all you need to do is run step 3 when reconnecting it followed by ctrl+R to reset the device. 
+3.  **Monitor** (if you used a `-build` alias or a manual `cargo build`): Connect your ESP device over USB and run:
+    ```bash
+    espflash flash --monitor
+    ```
+    For `defmt` builds, pass the ELF file to enable log decoding:
+    ```bash
+    espflash flash --monitor --log-format defmt
+    ```
 
-> 🛑 If you encounter strange behaviour with the CLI, it often helps to press ctrl+R to reset the device. Alternatively, you can terminate the whole session by pressing ctrl+C. Session termination requires that you run step 3 again to activate the monitor.
+> 📝 `defmt` builds require a monitoring tool capable of interpreting `defmt` encoding, such as `espflash`. Without it you will observe garbled output. The monitor requires the original ELF to decode incoming log frames.
+
+> 🛑 Flashing is only required once. After disconnecting and reconnecting the device, run `espflash monitor` then press `ctrl+R` to reset.
+
+> 🛑 If you encounter strange behaviour with the CLI, press `ctrl+R` to reset the device. Press `ctrl+C` to terminate the session — you will need to run `espflash monitor` again to reconnect.
 
 ## CLI Commands
 
@@ -194,32 +211,6 @@ This is a list of commands available through the CLI interface:
 
 > 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise the application will `panic` as the station won't have an AP to connect to.
 
-## Building From Source (Optional)
-Rather than downloading pre-built binaries, another approach is to clone the repository and build the source. This would require some additional dependencies and modifications depending on the device you are using.
-
-### 📦 Dependencies
-At a minimum, you would need the following:
-* Rust toolchain with ESP target support installed. Full instructions for setting up a development environment are available [here](https://docs.esp-rs.org/book/installation/index.html). 
-* Tool for flashing the firmware. It is recommended to use `esp-flash`. Installation instructions are available [here](https://docs.esp-rs.org/book/tooling/espflash.html).
-* A terminal program to view the output. It is also recommended to use  `esp-flash` which was installed in the previous step.
-
-### 📋 Procedure
-1. ***Setup Project***: Clone this repository. The project repository code configuration defaults to the ESP32-C3 device. If you are using a ESP32-C3 you can skip to step 3, otherwise you need to modify the `config.toml` for your desired device. Also if you wish to enable `defmt` logging, make sure to read the following section.
-2. ***Modify*** **`.cargo/config.toml`**: Head to the `config.toml` file and uncommment the runner and build target that aligns with the device you are using.
-3. ***Build***: execute the following command in the terminal to build the project:
-```bash
-cargo build --features "[device name] [logging framework]" --release
-
-# Example for the ESP32-C6 with println
-cargo build --features "esp32c6 println" --release
-
-# Example for the ESP32 with defmt
-cargo build --features "esp32s3 defmt" --release
-```
-4. ***Monitor***: execute the following command in the terminal to run the project:
-```bash
-cargo run --features "[device name] [logging framework]" --release
-```
 ## Enabling Logging w/ `defmt`
 This application can use either the standard `println!` macros or the `defmt` framework for logging.
 
