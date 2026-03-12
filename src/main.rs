@@ -269,6 +269,8 @@ async fn csi_collection(
             traffic_freq,
             hardware,
         );
+        node.set_protocol(esp_radio::wifi::Protocol::P802D11LR);
+        node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
 
         // Run for a fixed duration or indefinitely.
         // run_duration handles printing internally via CSINodeClient.
