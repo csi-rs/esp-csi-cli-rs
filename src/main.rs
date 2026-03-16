@@ -23,7 +23,7 @@ use esp_csi_rs::{
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(any(feature = "auto", feature = "uart"))]
 use esp_hal::uart::Uart;
-#[cfg(any(feature = "auto", feature = "jtag-serial"))]
+#[cfg(all(any(feature = "auto", feature = "jtag-serial"), not(feature = "esp32")))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::wifi::{AuthMethod, ClientConfig, Interfaces, WifiController};
 use menu::*;
