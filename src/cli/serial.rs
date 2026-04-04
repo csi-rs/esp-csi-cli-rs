@@ -1,5 +1,5 @@
 use esp_hal::uart::Uart;
-#[cfg(not(feature = "esp32"))]
+#[cfg(any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_hal::Async;
 
@@ -10,11 +10,23 @@ use esp_hal::Async;
 pub type SerialInterface<'d> = Uart<'d, Async>;
 
 /// Serial interface type used when `jtag-serial` is explicitly requested (non-ESP32).
-#[cfg(all(not(feature = "esp32"), not(feature = "auto"), feature = "jtag-serial"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    not(feature = "auto"),
+    feature = "jtag-serial"
+))]
 pub type SerialInterface<'d> = UsbSerialJtag<'d, Async>;
+
+/// ESP32-C2 has no USB Serial/JTAG peripheral, so force UART even if `jtag-serial` is selected.
+#[cfg(all(feature = "esp32c2", not(feature = "auto"), feature = "jtag-serial"))]
+pub type SerialInterface<'d> = Uart<'d, Async>;
 
 /// Serial interface type used when UART is explicitly requested (non-ESP32, no auto-detect).
 #[cfg(all(not(feature = "esp32"), not(feature = "auto"), feature = "uart"))]
+pub type SerialInterface<'d> = Uart<'d, Async>;
+
+/// In `auto` mode, ESP32-C2 always uses UART because USB Serial/JTAG is unavailable.
+#[cfg(all(feature = "esp32c2", feature = "auto"))]
 pub type SerialInterface<'d> = Uart<'d, Async>;
 
 /// Runtime-selectable serial interface for targets that support both UART and USB-JTAG.
@@ -22,7 +34,10 @@ pub type SerialInterface<'d> = Uart<'d, Async>;
 /// When the `auto` feature is enabled the correct backend is chosen at runtime by
 /// [`is_jtag`]: if a USB host is detected the JTAG peripheral is used, otherwise
 /// UART0 is used as a fallback.
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 pub enum SerialInterface<'d> {
     /// USB Serial JTAG backend (faster, preferred when a USB host is present).
     UsbJtag(UsbSerialJtag<'d, Async>),
@@ -30,7 +45,10 @@ pub enum SerialInterface<'d> {
     Uart(Uart<'d, Async>),
 }
 
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 impl<'d> core::fmt::Write for SerialInterface<'d> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         match self {
@@ -40,12 +58,18 @@ impl<'d> core::fmt::Write for SerialInterface<'d> {
     }
 }
 
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 impl<'d> embedded_io::ErrorType for SerialInterface<'d> {
     type Error = embedded_io::ErrorKind;
 }
 
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 impl<'d> embedded_io_async::Read for SerialInterface<'d> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         use embedded_io::Error;
@@ -57,7 +81,10 @@ impl<'d> embedded_io_async::Read for SerialInterface<'d> {
     }
 }
 
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 impl<'d> embedded_io::Write for SerialInterface<'d> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         use embedded_io::Error;
@@ -90,7 +117,10 @@ impl<'d> embedded_io::Write for SerialInterface<'d> {
 /// chip-specific and are selected via Cargo features at compile time.
 ///
 /// Not available on ESP32 which has no USB-Serial-JTAG peripheral.
-#[cfg(all(not(feature = "esp32"), feature = "auto"))]
+#[cfg(all(
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+))]
 pub fn is_jtag() -> bool {
     #[cfg(feature = "esp32c3")]
     const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
