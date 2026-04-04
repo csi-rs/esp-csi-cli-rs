@@ -260,8 +260,7 @@ async fn csi_collection(
                 let client_config = ClientConfig::default()
                     .with_ssid(user_config.sta_ssid.as_str().to_string())
                     .with_password(user_config.sta_password.as_str().to_string())
-                    .with_auth_method(AuthMethod::Wpa2Personal)
-                    .with_channel(user_config.channel);
+                    .with_auth_method(AuthMethod::Wpa2Personal);
                 Node::Central(CentralOpMode::WifiStation(WifiStationConfig {
                     client_config,
                 }))
@@ -290,6 +289,19 @@ async fn csi_collection(
             traffic_freq,
             hardware,
         );
+        // Protocol selection is mode-dependent:
+        // - WifiStation uses P802D11BGNLR (BGN + LR) for compatibility with standard APs
+        //   while still enabling the LR physical layer for improved CSI quality.
+        // - Sniffer/ESP-NOW use pure P802D11LR for maximum range between ESP devices.
+        match user_config.node_mode {
+            NodeMode::WifiStation => {
+                node.set_protocol(esp_radio::wifi::Protocol::P802D11BGNLR);
+            }
+            NodeMode::WifiSniffer | NodeMode::EspNowCentral | NodeMode::EspNowPeripheral => {
+                node.set_protocol(esp_radio::wifi::Protocol::P802D11LR);
+                node.set_rate(esp_radio::esp_now::WifiPhyRate::RateMcs0Lgi);
+            }
+        }
 
         // Run for a fixed duration or indefinitely.
         // run_duration handles printing internally via CSINodeClient.
