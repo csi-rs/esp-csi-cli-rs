@@ -5,9 +5,14 @@ mod cli;
 mod config;
 
 use crate::config::{UserConfig, DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, USER_CONFIG};
-#[cfg(not(feature = "esp32"))]
+#[cfg(any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"))]
 use cli::is_jtag;
-use cli::{Context, SerialInterface, ROOT_MENU};
+use cli::{Context, ROOT_MENU};
+#[cfg(all(
+    feature = "auto",
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3")
+))]
+use cli::SerialInterface;
 use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
@@ -23,7 +28,10 @@ use esp_csi_rs::{
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(any(feature = "auto", feature = "uart"))]
 use esp_hal::uart::Uart;
-#[cfg(all(any(feature = "auto", feature = "jtag-serial"), not(feature = "esp32")))]
+#[cfg(all(
+    any(feature = "auto", feature = "jtag-serial"),
+    any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3")
+))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::wifi::{AuthMethod, ClientConfig, Interfaces, WifiController};
 use menu::*;
@@ -73,13 +81,13 @@ async fn main(spawner: Spawner) {
     esp_alloc::heap_allocator!(size: 61 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    #[cfg(any(feature = "esp32c6", feature = "esp32c3"))]
+    #[cfg(any(feature = "esp32c2", feature = "esp32c3", feature = "esp32c6"))]
     {
         let sw_interrupt =
             esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
         esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     }
-    #[cfg(not(any(feature = "esp32c6", feature = "esp32c3")))]
+    #[cfg(not(any(feature = "esp32c2", feature = "esp32c3", feature = "esp32c6")))]
     esp_rtos::start(timg0.timer0);
 
     // Initialize ESP radio Controller
@@ -127,9 +135,20 @@ async fn main(spawner: Spawner) {
         }
 
         // Forced JTAG
-        #[cfg(feature = "jtag-serial")]
+        #[cfg(all(
+            feature = "jtag-serial",
+            any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3")
+        ))]
         {
             UsbSerialJtag::new(peripherals.USB_DEVICE).into_async()
+        }
+
+        // ESP32-C2: no USB Serial/JTAG peripheral, always use UART.
+        #[cfg(all(feature = "esp32c2", feature = "jtag-serial"))]
+        {
+            Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
+                .unwrap()
+                .into_async()
         }
 
         // Forced UART
@@ -141,28 +160,30 @@ async fn main(spawner: Spawner) {
         }
 
         // Runtime Auto-Detection
-        #[cfg(all(not(feature = "esp32"), feature = "auto"))]
+        #[cfg(all(
+            any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"),
+            feature = "auto"
+        ))]
         {
-            #[cfg(feature = "esp32")]
-            {
-                Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
-                    .unwrap()
-                    .into_async()
+            if is_jtag() {
+                SerialInterface::UsbJtag(
+                    UsbSerialJtag::new(peripherals.USB_DEVICE).into_async(),
+                )
+            } else {
+                SerialInterface::Uart(
+                    Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
+                        .unwrap()
+                        .into_async(),
+                )
             }
-            #[cfg(not(feature = "esp32"))]
-            {
-                if is_jtag() {
-                    SerialInterface::UsbJtag(
-                        UsbSerialJtag::new(peripherals.USB_DEVICE).into_async(),
-                    )
-                } else {
-                    SerialInterface::Uart(
-                        Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
-                            .unwrap()
-                            .into_async(),
-                    )
-                }
-            }
+        }
+
+        // ESP32-C2: auto mode falls back to UART because USB Serial/JTAG is unavailable.
+        #[cfg(all(feature = "esp32c2", feature = "auto"))]
+        {
+            Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
+                .unwrap()
+                .into_async()
         }
     };
 
