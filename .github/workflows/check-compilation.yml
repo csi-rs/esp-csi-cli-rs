@@ -1,0 +1,53 @@
+name: Check Compilation for Chips (Default Features)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compile:
+    name: ${{ matrix.chip.feature }} (${{ matrix.chip.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chip:
+          - feature: esp32
+            target: xtensa-esp32-none-elf
+            toolchain: esp
+          - feature: esp32c2
+            target: riscv32imc-unknown-none-elf
+            toolchain: stable
+          - feature: esp32c3
+            target: riscv32imc-unknown-none-elf
+            toolchain: stable
+          - feature: esp32c6
+            target: riscv32imac-unknown-none-elf
+            toolchain: stable
+          - feature: esp32s3
+            target: xtensa-esp32s3-none-elf
+            toolchain: esp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ESP Rust toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        with:
+          default: false
+          buildtargets: ${{ matrix.chip.feature }}
+          version: 1.93.0.0
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Check ${{ matrix.chip.feature }} with default features
+        run: cargo +${{ matrix.chip.toolchain }} check --locked --release --target ${{ matrix.chip.target }} --features ${{ matrix.chip.feature }}

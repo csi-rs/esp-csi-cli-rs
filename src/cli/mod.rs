@@ -7,7 +7,7 @@ use menu::{Item, ItemType, Menu, Parameter};
 
 use crate::cli::cmds::{reset_config, set_collection_mode, set_csi, set_log_mode, set_traffic, set_wifi, show_config, start_csi_collect};
 pub use crate::cli::serial::SerialInterface;
-#[cfg(not(feature = "esp32"))]
+#[cfg(any(feature = "esp32c3", feature = "esp32c6", feature = "esp32s3"))]
 pub use crate::cli::serial::is_jtag;
 
 /// Placeholder context passed through the `menu` crate to every command callback.
