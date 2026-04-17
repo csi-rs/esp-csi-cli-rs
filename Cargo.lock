@@ -738,9 +738,9 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "314df2a34271268c7c70720b212b1fffe8a2ec8c281c8307a24501e84ff1f61e"
+checksum = "4ad05843c91df1c3c6b1c1483047cc3207d1f47f41647a8e5d38708a6b5bc517"
 dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
