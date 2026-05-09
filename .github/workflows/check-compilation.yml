@@ -67,11 +67,14 @@ jobs:
 
       - name: Check ${{ matrix.chip.feature }}${{ matrix.flavor.label }}
         env:
-          # Empty for the default flavor; the defmt flavor sets a target-
-          # specific `--config` override that appends `-Tdefmt.x`. Xtensa
-          # builds need the `-Wl,` GCC-driver wrapper; RISC-V doesn't.
-          DEFMT_CONFIG_RISCV: '--config target.${{ matrix.chip.target }}.rustflags=["-C", "link-arg=-Tdefmt.x"]'
-          DEFMT_CONFIG_XTENSA: '--config target.${{ matrix.chip.target }}.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]'
+          # The defmt flavor passes a target-specific `--config` override that
+          # appends `-Tdefmt.x` to rustflags. Xtensa builds need the `-Wl,`
+          # GCC-driver wrapper; RISC-V doesn't. The TOML array is written
+          # without whitespace between elements so the inline expansion
+          # `$EXTRA` (unquoted, intentionally so `--config` and its value land
+          # as two separate argv elements) doesn't word-split mid-array.
+          DEFMT_CONFIG_RISCV: '--config target.${{ matrix.chip.target }}.rustflags=["-C","link-arg=-Tdefmt.x"]'
+          DEFMT_CONFIG_XTENSA: '--config target.${{ matrix.chip.target }}.rustflags=["-C","link-arg=-Wl,-Tdefmt.x"]'
         run: |
           set -euxo pipefail
           if [ "${{ matrix.flavor.label }}" = " (defmt)" ]; then
