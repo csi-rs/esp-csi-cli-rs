@@ -1,10 +1,10 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.2.1"
-edition = "2021"
+version = "0.4.0"
+edition = "2024"
 
 [features]
-default = ["no-std", "println", "auto", "async-print"]
+default = ["no-std", "println", "auto", "statistics"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via `println!()`.
@@ -13,6 +13,8 @@ println = ["esp-csi-rs/println", "esp-backtrace/println"]
 auto = ["esp-csi-rs/auto"]
 ## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
 async-print = ["esp-csi-rs/async-print"]
+## Expose runtime PPS / latency / drop counters via the `show-stats` command.
+statistics = ["esp-csi-rs/statistics"]
 ## Enable logging via defmt.
 defmt = [
     "esp-csi-rs/defmt",
@@ -28,14 +30,14 @@ esp32 = [
     "esp-csi-rs/esp32"
 ]
 
-## Support for the ESP32-C2
-esp32c2 = [
-    "esp-csi-rs/esp32c2"
-]
-
 ## Support for the ESP32-C3
 esp32c3 = [
     "esp-csi-rs/esp32c3"
+]
+
+## Support for the ESP32-C5
+esp32c5 = [
+    "esp-csi-rs/esp32c5"
 ]
 
 ## Support for the ESP32-C6 (WiFi 6)
@@ -49,38 +51,45 @@ esp32s3 = [
 ]
 
 [dependencies]
-esp-bootloader-esp-idf = "0.4.0"
-esp-backtrace = { version = "0.18.1", features = [
+esp-bootloader-esp-idf = "0.5.0"
+esp-backtrace = { version = "0.19.0", features = [
     "panic-handler",
 ] }
-esp-hal = { version = "~1.0", default-features = false, features = [
+esp-hal = { version = "~1.1", default-features = false, features = [
     "unstable",
 ] }
-esp-rtos = { version = "0.2.0", optional = false, features = [
+esp-rtos = { version = "0.3.0", optional = false, features = [
     "embassy",
     "esp-alloc",
     "esp-radio",
 ] }
-esp-println = { version = "0.16.1", default-features = false }
-esp-alloc = { version = "0.9.0" }
-embedded-io-async = "0.6.1"
-esp-radio = { version = "0.17.0", default-features = false, optional = false, features = [
+esp-println = { version = "0.17.0", default-features = false }
+esp-alloc = { version = "0.10.0" }
+embedded-io-async = "0.7.0"
+# 0.7 version of embedded-io, exposed under an alias because the workspace
+# also pulls in 0.6.1 for the `menu` crate (still on 0.6.x). Both crates need
+# their own ErrorType/Write impls on `SerialInterface`.
+embedded-io-07 = { package = "embedded-io", version = "0.7.0" }
+esp-radio = { version = "0.18.0", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
     "esp-alloc",
-    "smoltcp",
     "unstable",
     "esp-now",
     "csi",
 ] }
 heapless = { version = "0.7", default-features = false }
-embassy-executor = { version = "0.9.1" }
+embassy-executor = { version = "0.10.0" }
 embassy-time = { version = "0.5.0" }
 static_cell = { version = "2.1.1" }
-embassy-sync = { version = "0.7.0" }
-embassy-futures = { version = "0.1.1" }
-esp-csi-rs = { version = "0.4.3", default-features = false }
-menu = "0.6.1"
+embassy-sync = { version = "0.8.0" }
+embassy-futures = { version = "0.1.2" }
+esp-csi-rs = { version = "0.6.0", default-features = false }
+# `default-features = false` disables menu's per-keystroke echo. The CLI does
+# its own echo in the byte-stream preprocessor (main.rs) so that quote chars
+# and in-quote spaces render correctly — menu's echo would otherwise repaint
+# the buffer with the 0x1F sentinel (invisible) where the user typed a space.
+menu = { version = "0.6.1", default-features = false }
 embedded-io = "0.6.1"
 
 [profile.dev]

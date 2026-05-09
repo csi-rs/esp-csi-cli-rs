@@ -3,6 +3,13 @@ use core::sync::atomic::Ordering;
 use embedded_io::Write;
 use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
 use esp_csi_rs::logging::logging::LogMode;
+use esp_csi_rs::{set_csi_delivery_mode, set_csi_logging_enabled, CsiDeliveryMode};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::{
+    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_rx_rate_hz,
+    get_total_rx_packets, get_total_tx_packets, get_tx_rate_hz, get_two_way_latency,
+};
+use esp_radio::esp_now::WifiPhyRate;
 
 use menu::{Item, Menu, argument_finder};
 
@@ -50,7 +57,7 @@ pub fn set_traffic<'a>(
     });
 }
 
-#[cfg(feature = "esp32c6")]
+#[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 /// CLI command: `set-csi` (ESP32-C6 variant)
 ///
 /// Configures ESP32-C6-specific HE/STBC CSI acquisition flags in [`USER_CONFIG`].
@@ -327,7 +334,7 @@ pub fn set_csi<'a>(
     });
 }
 
-#[cfg(not(feature = "esp32c6"))]
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 /// CLI command: `set-csi` (non-ESP32-C6 variant)
 ///
 /// Configures classic CSI acquisition feature flags in [`USER_CONFIG`].
@@ -457,8 +464,8 @@ pub fn set_csi<'a>(
 ///
 /// # Options
 /// - `--mode=<station|sniffer|esp-now-central|esp-now-peripheral>` — Operating mode.
-/// - `--sta-ssid=<SSID>` — SSID for Station mode (replace spaces with `_`).
-/// - `--sta-password=<PASSWORD>` — Password for Station mode (replace spaces with `_`).
+/// - `--sta-ssid=<SSID>` — SSID for Station mode. Wrap in `'...'` or `"..."` to include spaces; underscores are passed through literally.
+/// - `--sta-password=<PASSWORD>` — Password for Station mode. Same quoting rules as `--sta-ssid`.
 /// - `--set-channel=<NUMBER>` — WiFi channel (1–14).
 ///
 /// Prints the updated WiFi configuration after applying changes.
@@ -512,10 +519,12 @@ pub fn set_wifi<'a>(
     match sta_ssid {
         Ok(str) => {
             if let Some(s) = str {
-                let str_w_space = s.replace("_", " ");
-                // Convert the `mod_str` into a `heapless::String<32>`
+                // 0x1F is the sentinel used by main.rs's quote-aware
+                // preprocessor for spaces inside `'...'` / `"..."`. Underscores
+                // are passed through literally.
+                let str_w_space = s.replace('\u{1F}', " ");
                 let mut hpls_str_w_space = heapless::String::<32>::new();
-                hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
+                hpls_str_w_space.push_str(&str_w_space).unwrap();
 
                 USER_CONFIG.lock(|config| {
                     config.borrow_mut().as_mut().unwrap().sta_ssid =
@@ -528,10 +537,9 @@ pub fn set_wifi<'a>(
     match sta_password {
         Ok(str) => {
             if let Some(s) = str {
-                let str_w_space = s.replace("_", " ");
-                // Convert the `mod_str` into a `heapless::String<32>`
+                let str_w_space = s.replace('\u{1F}', " ");
                 let mut hpls_str_w_space = heapless::String::<32>::new();
-                hpls_str_w_space.push_str(&str_w_space).unwrap(); // Ensure it fits within the capacity
+                hpls_str_w_space.push_str(&str_w_space).unwrap();
 
                 USER_CONFIG.lock(|config| {
                     config.borrow_mut().as_mut().unwrap().sta_password = hpls_str_w_space
@@ -575,6 +583,8 @@ pub fn set_wifi<'a>(
 ///
 /// # Behaviour
 /// Sends `Some(secs)` to [`START_SIGNAL`] for a timed run, or `None` for an indefinite run.
+/// Pressing `q` or `Q` on the serial console while collection is active triggers an
+/// early stop via [`STOP_REQUEST`].
 pub fn start_csi_collect<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
@@ -660,13 +670,15 @@ pub fn set_collection_mode<'a>(
 /// CLI command: `set-log-mode`
 ///
 /// Changes the CSI packet output format at runtime by calling
-/// [`esp_csi_rs::set_log_mode`]. The change takes effect immediately for
-/// subsequent packets logged by the `esp-csi-rs` async logger backend.
+/// [`esp_csi_rs::logging::logging::set_log_mode`]. The change takes effect
+/// immediately for subsequent packets logged by the `esp-csi-rs` logger
+/// backend (sync or async-print).
 ///
 /// # Options
-/// - `--mode=text`        — Verbose human-readable output with full metadata (default).
-/// - `--mode=array-list`  — Compact CSV-style array, one line per packet.
-/// - `--mode=serialized`  — Binary COBS-framed postcard format for host-side parsing.
+/// - `--mode=text`          — Verbose human-readable output with full metadata (default).
+/// - `--mode=array-list`    — Compact CSV-style array, one line per packet.
+/// - `--mode=serialized`    — Binary COBS-framed postcard format for host-side parsing.
+/// - `--mode=esp-csi-tool`  — Hernandez-style 26-column CSV (compatible with the ESP32-CSI-Tool collector).
 ///
 /// Prints the updated mode after applying the change.
 pub fn set_log_mode<'a>(
@@ -691,13 +703,25 @@ pub fn set_log_mode<'a>(
                 csi_set_log_mode(LogMode::Serialized);
                 "Serialized"
             }
+            "esp-csi-tool" => {
+                csi_set_log_mode(LogMode::EspCsiTool);
+                "EspCsiTool"
+            }
             _ => {
-                writeln!(serial, "Invalid mode. Use 'text', 'array-list', or 'serialized'.").unwrap();
+                writeln!(
+                    serial,
+                    "Invalid mode. Use 'text', 'array-list', 'serialized', or 'esp-csi-tool'."
+                )
+                .unwrap();
                 return;
             }
         },
         _ => {
-            writeln!(serial, "Usage: set-log-mode --mode=<text|array-list|serialized>").unwrap();
+            writeln!(
+                serial,
+                "Usage: set-log-mode --mode=<text|array-list|serialized|esp-csi-tool>"
+            )
+            .unwrap();
             return;
         }
     };
@@ -739,10 +763,17 @@ pub fn show_config<'a>(
         };
         writeln!(serial, "  Mode          : {}", mode_str).unwrap();
         writeln!(serial, "  Traffic Freq  : {}Hz", cfg.trigger_freq).unwrap();
+        writeln!(serial, "  PHY Rate      : {:?}", cfg.phy_rate).unwrap();
+        writeln!(
+            serial,
+            "  IO Tasks      : tx={}, rx={}",
+            cfg.io_tasks.tx_enabled, cfg.io_tasks.rx_enabled
+        )
+        .unwrap();
 
         // CSI configuration (platform-specific fields)
         writeln!(serial, "\n[CSI Config]").unwrap();
-        #[cfg(feature = "esp32c6")]
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         {
             writeln!(serial, "  Acquire CSI        : {}", cfg.csi_config.enable).unwrap();
             writeln!(serial, "  Legacy (11g)       : {}", cfg.csi_config.acquire_csi_legacy).unwrap();
@@ -755,7 +786,7 @@ pub fn show_config<'a>(
             writeln!(serial, "  STBC HE            : {}", cfg.csi_config.acquire_csi_he_stbc).unwrap();
             writeln!(serial, "  Scale Value        : {}", cfg.csi_config.val_scale_cfg).unwrap();
         }
-        #[cfg(not(feature = "esp32c6"))]
+        #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
         {
             writeln!(serial, "  LLTF Enabled       : {}", cfg.csi_config.lltf_en).unwrap();
             writeln!(serial, "  HTLTF Enabled      : {}", cfg.csi_config.htltf_en).unwrap();
@@ -789,4 +820,201 @@ pub fn reset_config<'a>(
         config.replace(Some(default_config));
     });
     writeln!(serial, "\nConfiguration Reset to Default Values\n").unwrap();
+}
+
+/// CLI command: `set-rate`
+///
+/// Sets the Wi-Fi PHY rate stored in [`USER_CONFIG`]. Only ESP-NOW central /
+/// peripheral modes apply this; sniffer/station derive their rate from the
+/// surrounding radio configuration.
+///
+/// # Options
+/// - `--rate=<NAME>` — One of: `mcs0-lgi`, `mcs1-lgi`, `mcs2-lgi`, `mcs3-lgi`,
+///   `mcs4-lgi`, `mcs5-lgi`, `mcs6-lgi`, `mcs7-lgi`, `mcs0-sgi`, `1m`, `2m`,
+///   `5m5`, `11m`, `6m`, `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`.
+pub fn set_phy_rate<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let rate = argument_finder(item, args, "rate");
+    let parsed = match rate {
+        Ok(Some(s)) => match s {
+            "1m" | "1m-l" => Some(WifiPhyRate::Rate1mL),
+            "2m" => Some(WifiPhyRate::Rate2m),
+            "5m5" | "5m5-l" => Some(WifiPhyRate::Rate5mL),
+            "11m" | "11m-l" => Some(WifiPhyRate::Rate11mL),
+            "6m" => Some(WifiPhyRate::Rate6m),
+            "9m" => Some(WifiPhyRate::Rate9m),
+            "12m" => Some(WifiPhyRate::Rate12m),
+            "18m" => Some(WifiPhyRate::Rate18m),
+            "24m" => Some(WifiPhyRate::Rate24m),
+            "36m" => Some(WifiPhyRate::Rate36m),
+            "48m" => Some(WifiPhyRate::Rate48m),
+            "54m" => Some(WifiPhyRate::Rate54m),
+            "mcs0-lgi" => Some(WifiPhyRate::RateMcs0Lgi),
+            "mcs1-lgi" => Some(WifiPhyRate::RateMcs1Lgi),
+            "mcs2-lgi" => Some(WifiPhyRate::RateMcs2Lgi),
+            "mcs3-lgi" => Some(WifiPhyRate::RateMcs3Lgi),
+            "mcs4-lgi" => Some(WifiPhyRate::RateMcs4Lgi),
+            "mcs5-lgi" => Some(WifiPhyRate::RateMcs5Lgi),
+            "mcs6-lgi" => Some(WifiPhyRate::RateMcs6Lgi),
+            "mcs7-lgi" => Some(WifiPhyRate::RateMcs7Lgi),
+            "mcs0-sgi" => Some(WifiPhyRate::RateMcs0Sgi),
+            _ => None,
+        },
+        _ => {
+            writeln!(serial, "Usage: set-rate --rate=<rate>").unwrap();
+            return;
+        }
+    };
+    match parsed {
+        Some(r) => {
+            USER_CONFIG.lock(|c| c.borrow_mut().as_mut().unwrap().phy_rate = r);
+            writeln!(serial, "\nPHY Rate: {:?}", r).unwrap();
+        }
+        None => {
+            writeln!(
+                serial,
+                "Invalid rate. Try mcs0-lgi (default), mcs7-lgi, 6m, 24m, 54m, etc."
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// CLI command: `set-io-tasks`
+///
+/// Toggles TX and/or RX direction tasks via [`IOTaskConfig`]. Useful for
+/// asymmetric topologies where one node only generates traffic and another
+/// only receives.
+///
+/// # Options
+/// - `--tx=<on|off>` — Enable or disable the TX task. Omit to keep current.
+/// - `--rx=<on|off>` — Enable or disable the RX task. Omit to keep current.
+pub fn set_io_tasks_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    fn parse_bool(s: &str) -> Option<bool> {
+        match s {
+            "on" | "true" | "1" | "yes" => Some(true),
+            "off" | "false" | "0" | "no" => Some(false),
+            _ => None,
+        }
+    }
+    let tx = argument_finder(item, args, "tx");
+    let rx = argument_finder(item, args, "rx");
+    USER_CONFIG.lock(|cfg| {
+        let mut cfg = cfg.borrow_mut();
+        let cfg = cfg.as_mut().unwrap();
+        if let Ok(Some(s)) = tx {
+            match parse_bool(s) {
+                Some(v) => cfg.io_tasks.tx_enabled = v,
+                None => writeln!(serial, "Invalid --tx value (use on|off).").unwrap(),
+            }
+        }
+        if let Ok(Some(s)) = rx {
+            match parse_bool(s) {
+                Some(v) => cfg.io_tasks.rx_enabled = v,
+                None => writeln!(serial, "Invalid --rx value (use on|off).").unwrap(),
+            }
+        }
+        writeln!(
+            serial,
+            "\nIO Tasks: tx={}, rx={}",
+            cfg.io_tasks.tx_enabled, cfg.io_tasks.rx_enabled
+        )
+        .unwrap();
+    });
+}
+
+/// CLI command: `set-csi-delivery`
+///
+/// Switches the CSI delivery mode at runtime (Off, Callback, or Async). The
+/// inline log gate is also toggled with `--logging=on|off` if supplied.
+///
+/// # Options
+/// - `--mode=<off|callback|async>` — Pick how the WiFi callback hands CSI
+///   packets out. `async` queues to `CSINodeClient::next_csi_packet`,
+///   `callback` invokes the inline `set_csi_callback` hook, `off` drops
+///   the dispatch entirely.
+/// - `--logging=<on|off>` — Toggle the inline `log_csi` per-packet UART/JTAG
+///   path independently of the delivery mode.
+pub fn set_csi_delivery_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let mode = argument_finder(item, args, "mode");
+    if let Ok(Some(s)) = mode {
+        match s {
+            "off" => {
+                set_csi_delivery_mode(CsiDeliveryMode::Off);
+                writeln!(serial, "Delivery mode: Off").unwrap();
+            }
+            "callback" => {
+                set_csi_delivery_mode(CsiDeliveryMode::Callback);
+                writeln!(serial, "Delivery mode: Callback").unwrap();
+            }
+            "async" => {
+                set_csi_delivery_mode(CsiDeliveryMode::Async);
+                writeln!(serial, "Delivery mode: Async").unwrap();
+            }
+            _ => {
+                writeln!(serial, "Invalid mode. Use 'off', 'callback', or 'async'.").unwrap();
+            }
+        }
+    }
+    let logging = argument_finder(item, args, "logging");
+    if let Ok(Some(s)) = logging {
+        match s {
+            "on" | "true" | "1" | "yes" => {
+                set_csi_logging_enabled(true);
+                writeln!(serial, "Inline CSI logging: ON").unwrap();
+            }
+            "off" | "false" | "0" | "no" => {
+                set_csi_logging_enabled(false);
+                writeln!(serial, "Inline CSI logging: OFF").unwrap();
+            }
+            _ => {
+                writeln!(serial, "Invalid --logging value (use on|off).").unwrap();
+            }
+        }
+    }
+}
+
+/// CLI command: `show-stats` (compiled in only with the `statistics` feature)
+///
+/// Reads the runtime CSI/traffic counters exposed by `esp-csi-rs` and prints
+/// a one-shot snapshot. These counters are accumulated by the WiFi callback
+/// and the ESP-NOW TX path; they are most meaningful while a collection is
+/// running, but they remain queryable between runs (the values reset on the
+/// start of each new `start`).
+#[cfg(feature = "statistics")]
+pub fn show_stats<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    _item: &Item<SerialInterface, Context>,
+    _args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    writeln!(serial, "\n====== Runtime Statistics ======").unwrap();
+    writeln!(serial, "  RX Total Packets : {}", get_total_rx_packets()).unwrap();
+    writeln!(serial, "  TX Total Packets : {}", get_total_tx_packets()).unwrap();
+    writeln!(serial, "  RX PPS (avg)     : {}", get_pps_rx()).unwrap();
+    writeln!(serial, "  TX PPS (avg)     : {}", get_pps_tx()).unwrap();
+    writeln!(serial, "  RX Rate (Hz)     : {}", get_rx_rate_hz()).unwrap();
+    writeln!(serial, "  TX Rate (Hz)     : {}", get_tx_rate_hz()).unwrap();
+    writeln!(serial, "  RX Dropped Pkts  : {}", get_dropped_packets_rx()).unwrap();
+    writeln!(serial, "  One-way Latency  : {} us", get_one_way_latency()).unwrap();
+    writeln!(serial, "  Two-way Latency  : {} us", get_two_way_latency()).unwrap();
+    writeln!(serial, "================================\n").unwrap();
 }

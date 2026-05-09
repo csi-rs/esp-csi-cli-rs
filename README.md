@@ -6,6 +6,7 @@ In order to use this crate, you would need to flash the source code for your tar
 
 - ESP32
 - ESP32-C3
+- ESP32-C5
 - ESP32-C6
 - ESP32-S3
 
@@ -20,9 +21,13 @@ In order to use this crate, you would need to flash the source code for your tar
 * **Multiple Wi-Fi Modes:** Configure the ESP device as a Station, Sniffer, ESP-NOW Central, or ESP-NOW Peripheral.
 * **Traffic Generation:** Generate traffic at configurable intervals.
 * **Fine-grained CSI Control:** Enable or disable specific CSI features like LLTF, HTLTF, STBC HTLTF, and LTF Merge.
+* **PHY Rate / IO Task Control:** Pin the ESP-NOW PHY rate and toggle TX or RX direction tasks at the CLI.
+* **Runtime Delivery Switching:** Flip CSI delivery between async-queued, inline callback, and off without re-flashing.
+* **Statistics Snapshot:** `show-stats` reports PPS, drops, and one/two-way ESP-NOW latency on demand.
 * **Collection Mode:** Switch the node between Collector and Listener roles at runtime.
-* **Flexible Log Format:** Choose between human-readable text, compact array-list, or binary serialized output.
+* **Flexible Log Format:** Choose between human-readable text, compact array-list, binary serialized, or ESP-CSI-Tool-compatible CSV output.
 * **CLI Control:** Interact with the device using simple commands over a serial connection.
+* **Early Stop:** Press `q` to abort a running collection — even an indefinite one — without resetting the board.
 * **Configuration Management:** Show the current configuration or reset to defaults.
 * **Timed Collection:** Start CSI collection for a specific duration or run indefinitely.
 * **Flexible Logging:** Supports standard `println!` or the more efficient `defmt` logging.
@@ -48,6 +53,7 @@ In order to use this crate, you would need to flash the source code for your tar
     |----------|-------------------|
     | ESP32    | `cargo esp32`     |
     | ESP32-C3 | `cargo esp32c3`   |
+    | ESP32-C5 | `cargo esp32c5`   |
     | ESP32-C6 | `cargo esp32c6`   |
     | ESP32-S3 | `cargo esp32s3`   |
 
@@ -61,12 +67,14 @@ In order to use this crate, you would need to flash the source code for your tar
     |---------------|----------------------------------------------------------------------|
     | `esp32`       | Target: ESP32                                                        |
     | `esp32c3`     | Target: ESP32-C3                                                     |
-    | `esp32c6`     | Target: ESP32-C6 (WiFi 6)                                           |
+    | `esp32c5`     | Target: ESP32-C5                                                     |
+    | `esp32c6`     | Target: ESP32-C6 (WiFi 6)                                            |
     | `esp32s3`     | Target: ESP32-S3                                                     |
     | `println`     | Log via `println!` (default)                                         |
     | `defmt`       | Log via `defmt` (efficient binary logging)                           |
     | `auto`        | Auto-select JTAG or UART backend at runtime (default)                |
-    | `async-print` | Non-blocking async logging — unstable, use with caution (default)    |
+    | `async-print` | Non-blocking async logging — unstable, use with caution              |
+    | `statistics`  | Expose runtime PPS/latency/drop counters via `show-stats` (default)  |
     | `jtag-serial` | Force JTAG serial backend                                            |
     | `uart`        | Force UART backend                                                   |
 
@@ -94,7 +102,7 @@ In order to use this crate, you would need to flash the source code for your tar
 ## CLI Commands
 
 This is a list of commands available through the CLI interface:
-> 📝 The `set-csi` command options differ for the ESP32-C6.
+> 📝 The `set-csi` command options differ on the ESP32-C5 and ESP32-C6 (which expose the HE/STBC field set instead of the classic LLTF/HTLTF flags).
 
 * **`help [command]`**
     * Description: Display the main help menu or details for a specific command.
@@ -119,23 +127,24 @@ This is a list of commands available through the CLI interface:
 * **`set-log-mode [OPTIONS]`**
     * Description: Set the CSI output logging format at runtime.
     * Options:
-        * `--mode=<text|array-list|serialized>`: Output format for CSI packets (default: `text`).
+        * `--mode=<text|array-list|serialized|esp-csi-tool>`: Output format for CSI packets (default: `text`).
             * `text`: Verbose human-readable output with full metadata.
             * `array-list`: Compact CSV-style array, one line per packet — best for host-side data processing.
             * `serialized`: Binary COBS-framed postcard format — most compact, requires a compatible deserializer on the host.
+            * `esp-csi-tool`: Hernandez-style 26-column CSV (`CSI_DATA,...` lines) compatible with the ESP32-CSI-Tool collector.
     * Examples:
         * `set-log-mode --mode=text`
         * `set-log-mode --mode=array-list`
-        * `set-log-mode --mode=serialized`
+        * `set-log-mode --mode=esp-csi-tool`
 
 * **`set-csi [OPTIONS]`**
     * Description: Configure CSI feature flags.
-    * Options (non-ESP32-C6):
+    * Options (ESP32, ESP32-C3, ESP32-S3):
         * `--disable-lltf`: Disable LLTF CSI (default: enabled).
         * `--disable-htltf`: Disable HTLTF CSI (default: enabled).
         * `--disable-stbc-htltf`: Disable STBC HTLTF CSI (default: enabled).
         * `--disable-ltf-merge`: Disable LTF Merge CSI (default: enabled).
-    * Options (ESP32-C6):
+    * Options (ESP32-C5, ESP32-C6):
         * `--disable-csi`: Disable acquisition of CSI entirely.
         * `--disable-csi-legacy`: Disable L-LTF acquisition for 11g PPDUs.
         * `--disable-csi-ht20`: Disable HT-LTF for HT20 PPDUs.
@@ -151,7 +160,7 @@ This is a list of commands available through the CLI interface:
         * `set-csi --disable-csi-legacy --csi-he-stbc=1`
 
 * **`set-wifi [OPTIONS]`**
-    * Description: Configure WiFi and network settings. **Note:** Replace spaces in SSIDs or passwords with underscores (`_`).
+    * Description: Configure WiFi and network settings. **Note:** SSIDs/passwords with spaces should be wrapped in single or double quotes (e.g. `--sta-ssid='My Network'` or `--sta-ssid="My Network"`). Both quote styles are interchangeable. Underscores (`_`) are passed through literally.
     * Options:
         * `--mode=<station|sniffer|esp-now-central|esp-now-peripheral>`: Specify WiFi operation mode (default: `sniffer`).
         * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
@@ -159,11 +168,11 @@ This is a list of commands available through the CLI interface:
         * `--set-channel=<NUMBER>`: Set the WiFi channel (default: 1).
     * Examples:
         * `set-wifi --mode=sniffer --set-channel=6`
-        * `set-wifi --mode=station --sta-ssid=My_Network --sta-password=my_password`
+        * `set-wifi --mode=station --sta-ssid="My Network" --sta-password="my password"`
         * `set-wifi --mode=esp-now-central`
 
 * **`start [OPTIONS]`**
-    * Description: Start the CSI collection process. Ensure the device is configured first.
+    * Description: Start the CSI collection process. Ensure the device is configured first. Press `q` (or `Q`) on the serial console at any time to stop collection early.
     * Options:
         * `--duration=<SECONDS>`: Specify the duration in seconds. If omitted, collection runs indefinitely.
     * Examples:
@@ -178,6 +187,36 @@ This is a list of commands available through the CLI interface:
     * Description: Reset all configurations to their default values.
     * Example: `reset-config`
 
+* **`set-rate [OPTIONS]`** *(ESP-NOW only)*
+    * Description: Pin the Wi-Fi PHY rate used by ESP-NOW central / peripheral nodes. Sniffer and station modes ignore this and derive their rate from the surrounding radio configuration.
+    * Options:
+        * `--rate=<NAME>`: One of `mcs0-lgi` (default), `mcs1-lgi`..`mcs7-lgi`, `mcs0-sgi`, `1m`, `2m`, `5m5`, `11m`, `6m`, `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`.
+    * Examples:
+        * `set-rate --rate=mcs0-lgi`
+        * `set-rate --rate=24m`
+
+* **`set-io-tasks [OPTIONS]`**
+    * Description: Toggle the TX and/or RX direction tasks. Useful for asymmetric topologies — disabling RX makes the node a pure transmitter (skips the WiFi-callback CSI path); disabling TX makes it a pure receiver (no traffic generation).
+    * Options:
+        * `--tx=<on|off>`: Enable or disable the TX task. Omit to keep the current state.
+        * `--rx=<on|off>`: Enable or disable the RX task. Omit to keep the current state.
+    * Examples:
+        * `set-io-tasks --tx=off`         (listener-only)
+        * `set-io-tasks --tx=on --rx=on`  (default)
+
+* **`set-csi-delivery [OPTIONS]`**
+    * Description: Switch the CSI delivery mode at runtime, and independently toggle the inline UART/JTAG log gate. The two delivery paths are mutually exclusive — the WiFi callback only ever pays for one per packet.
+    * Options:
+        * `--mode=<off|callback|async>`: `off` drops user delivery, `callback` invokes the registered `set_csi_callback` hook inline in the WiFi callback, `async` queues to `CSINodeClient::next_csi_packet` (default for the indefinite collection path).
+        * `--logging=<on|off>`: Toggle the per-packet `log_csi` UART/JTAG gate independently.
+    * Examples:
+        * `set-csi-delivery --mode=async`
+        * `set-csi-delivery --mode=off --logging=off`
+
+* **`show-stats`** *(requires `statistics` feature, on by default)*
+    * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, RX dropped packets, one-way and two-way ESP-NOW latency. Counters reset on the start of each new `start` collection.
+    * Example: `show-stats`
+
 ## CLI Configuration Examples
 
 1.  **Configure an ESP as a WiFi Sniffer on channel 6 and collect indefinitely in array-list format:**
@@ -190,7 +229,7 @@ This is a list of commands available through the CLI interface:
 
 2.  **Configure an ESP as a Station connected to an existing network and collect for 5 minutes:**
     ```
-    set-wifi --mode=station --sta-ssid=My_Router --sta-password=router_password
+    set-wifi --mode=station --sta-ssid="My Router" --sta-password="router password"
     set-traffic --frequency-hz=20
     show-config
     start --duration=300
@@ -205,11 +244,29 @@ This is a list of commands available through the CLI interface:
     start --duration=120
     ```
 
+4.  **ESP-NOW pair: pin the PHY rate and disable TX on the listener node, then check stats mid-run:**
+    ```
+    set-wifi --mode=esp-now-peripheral
+    set-rate --rate=mcs0-lgi
+    set-io-tasks --tx=off
+    set-csi-delivery --mode=async --logging=on
+    start
+    # ... in another window or after pressing 'q' to stop:
+    show-stats
+    ```
+
+5.  **Emit ESP32-CSI-Tool-compatible CSV for a host pipeline:**
+    ```
+    set-wifi --mode=sniffer --set-channel=6
+    set-log-mode --mode=esp-csi-tool
+    start --duration=60
+    ```
+
 ## Important Notes
 
-> 🛑 SSIDs and passwords containing spaces must have the spaces replaced with underscores (`_`) when using the `set-wifi` command. The application will convert them back internally.
+> 💡 SSIDs and passwords with spaces can be passed as quoted strings to `set-wifi`. Both quote styles work — `--sta-ssid='My WiFi'` and `--sta-ssid="My WiFi"` are equivalent — so you can pick whichever your terminal/keyboard makes easier to type. Underscores (`_`) are passed through literally.
 
-> 🛑 Ensure the target AP is running before starting collection in Station mode. Otherwise the application will `panic` as the station won't have an AP to connect to.
+> 🛑 To stop a running collection early — including indefinite runs started without `--duration` — press `q` (or `Q`) on the serial console.
 
 ## Enabling Logging w/ `defmt`
 This application can use either the standard `println!` macros or the `defmt` framework for logging.
