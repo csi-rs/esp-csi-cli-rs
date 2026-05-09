@@ -20,6 +20,84 @@ esp32c5-build = "build --release --features=esp32c5 --target=riscv32imac-unknown
 esp32c6-build = "build --release --features=esp32c6 --target=riscv32imac-unknown-none-elf"
 esp32s3-build = "build --release --features=esp32s3 --target=xtensa-esp32s3-none-elf"
 
+# defmt convenience aliases — drop the default `println` feature, opt into
+# `defmt`, append `-Tdefmt.x` to the linker script set, and override the
+# runner to pass `--log-format defmt` to espflash so the host can decode the
+# binary log frames. No need to edit `.cargo/config.toml` by hand.
+#
+# `--config target.<triple>.rustflags` *merges* with the rustflags from the
+# `cfg(target_arch=…)` blocks above, so we only specify the *delta*
+# (`-Tdefmt.x`) here — `-Tlinkall.x` / `-nostartfiles` come from the cfg block.
+esp32-defmt = [
+    "run", "--release", "--no-default-features",
+    "--features=esp32,defmt,no-std,auto,statistics",
+    "--target=xtensa-esp32-none-elf",
+    "--config", 'target.xtensa-esp32-none-elf.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]',
+    "--config", 'target.xtensa-esp32-none-elf.runner="espflash flash --monitor --log-format defmt"',
+]
+esp32c3-defmt = [
+    "run", "--release", "--no-default-features",
+    "--features=esp32c3,defmt,no-std,auto,statistics",
+    "--target=riscv32imc-unknown-none-elf",
+    "--config", 'target.riscv32imc-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+    "--config", 'target.riscv32imc-unknown-none-elf.runner="espflash flash --monitor --log-format defmt"',
+]
+esp32c5-defmt = [
+    "run", "--release", "--no-default-features",
+    "--features=esp32c5,defmt,no-std,auto,statistics",
+    "--target=riscv32imac-unknown-none-elf",
+    "--config", 'target.riscv32imac-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+    "--config", 'target.riscv32imac-unknown-none-elf.runner="espflash flash --monitor --log-format defmt"',
+]
+esp32c6-defmt = [
+    "run", "--release", "--no-default-features",
+    "--features=esp32c6,defmt,no-std,auto,statistics",
+    "--target=riscv32imac-unknown-none-elf",
+    "--config", 'target.riscv32imac-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+    "--config", 'target.riscv32imac-unknown-none-elf.runner="espflash flash --monitor --log-format defmt"',
+]
+esp32s3-defmt = [
+    "run", "--release", "--no-default-features",
+    "--features=esp32s3,defmt,no-std,auto,statistics",
+    "--target=xtensa-esp32s3-none-elf",
+    "--config", 'target.xtensa-esp32s3-none-elf.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]',
+    "--config", 'target.xtensa-esp32s3-none-elf.runner="espflash flash --monitor --log-format defmt"',
+]
+
+# Build-only defmt variants (no flashing/running). The linker rustflags
+# override is still needed because `-Tdefmt.x` is a link-time requirement;
+# the runner override is omitted because nothing is run.
+esp32-defmt-build = [
+    "build", "--release", "--no-default-features",
+    "--features=esp32,defmt,no-std,auto,statistics",
+    "--target=xtensa-esp32-none-elf",
+    "--config", 'target.xtensa-esp32-none-elf.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]',
+]
+esp32c3-defmt-build = [
+    "build", "--release", "--no-default-features",
+    "--features=esp32c3,defmt,no-std,auto,statistics",
+    "--target=riscv32imc-unknown-none-elf",
+    "--config", 'target.riscv32imc-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+]
+esp32c5-defmt-build = [
+    "build", "--release", "--no-default-features",
+    "--features=esp32c5,defmt,no-std,auto,statistics",
+    "--target=riscv32imac-unknown-none-elf",
+    "--config", 'target.riscv32imac-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+]
+esp32c6-defmt-build = [
+    "build", "--release", "--no-default-features",
+    "--features=esp32c6,defmt,no-std,auto,statistics",
+    "--target=riscv32imac-unknown-none-elf",
+    "--config", 'target.riscv32imac-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]',
+]
+esp32s3-defmt-build = [
+    "build", "--release", "--no-default-features",
+    "--features=esp32s3,defmt,no-std,auto,statistics",
+    "--target=xtensa-esp32s3-none-elf",
+    "--config", 'target.xtensa-esp32s3-none-elf.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]',
+]
+
 [target.'cfg(target_arch = "riscv32")']
 # Default runner and linker flags for all RISC-V ESP targets.
 # runner = "espflash flash --monitor --log-format defmt"

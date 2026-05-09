@@ -49,17 +49,19 @@ In order to use this crate, you would need to flash the source code for your tar
 
 2.  **Build & Flash** using the provided Cargo aliases — one command builds, flashes, and opens the monitor:
 
-    | Device   | Command           |
-    |----------|-------------------|
-    | ESP32    | `cargo esp32`     |
-    | ESP32-C3 | `cargo esp32c3`   |
-    | ESP32-C5 | `cargo esp32c5`   |
-    | ESP32-C6 | `cargo esp32c6`   |
-    | ESP32-S3 | `cargo esp32s3`   |
+    | Device   | `println` (default) | `defmt`                 |
+    |----------|---------------------|-------------------------|
+    | ESP32    | `cargo esp32`       | `cargo esp32-defmt`     |
+    | ESP32-C3 | `cargo esp32c3`     | `cargo esp32c3-defmt`   |
+    | ESP32-C5 | `cargo esp32c5`     | `cargo esp32c5-defmt`   |
+    | ESP32-C6 | `cargo esp32c6`     | `cargo esp32c6-defmt`   |
+    | ESP32-S3 | `cargo esp32s3`     | `cargo esp32s3-defmt`   |
 
-    To build without flashing, use the `-build` variants: `cargo esp32c6-build`, `cargo esp32s3-build`, etc.
+    To build without flashing, append `-build` to any of the above (e.g. `cargo esp32c6-build`, `cargo esp32s3-defmt-build`, etc.).
 
-    > 📝 The aliases default to `println` logging. To use `defmt` instead, uncomment the `defmt` runner and linker flag lines in `.cargo/config.toml` for your target before running the alias. See [Enabling `defmt` Logging](#enabling-logging-w-defmt) for details.
+    The `*-defmt` variants automatically: drop the `println` feature, enable `defmt`, append `-Tdefmt.x` to the linker script set, and pass `--log-format defmt` to `espflash` so the monitor decodes binary log frames. No `.cargo/config.toml` editing required.
+
+    > 📝 The plain aliases default to `println` logging. For `defmt` builds use the parallel `*-defmt` (run + flash + monitor with frame decoding) and `*-defmt-build` (build only) aliases — they swap in the right features, runner, and linker script automatically. See [Enabling `defmt` Logging](#enabling-logging-w-defmt) for details.
 
     **Custom builds** — if you need finer control over features, you can invoke `cargo build` directly. The full set of available features is:
 
@@ -269,21 +271,35 @@ This is a list of commands available through the CLI interface:
 > 🛑 To stop a running collection early — including indefinite runs started without `--duration` — press `q` (or `Q`) on the serial console.
 
 ## Enabling Logging w/ `defmt`
-This application can use either the standard `println!` macros or the `defmt` framework for logging.
 
-If you wan to enable `defmt` you need to make sure of the following in the `.cargo/config.toml`:
-1.  **Runner Parameters are Included:** In `.cargo/config.toml` make sure `--log-format defmt` is added to the `runner` arguments as follows:
+This application can use either the standard `println!` macros or the `defmt` framework for logging. `defmt` produces compact binary frames that the host (`espflash`, `probe-rs`, etc.) decodes against the original ELF, so it's both faster on the device and richer on the host.
+
+The recommended way is the `*-defmt` / `*-defmt-build` cargo aliases — pick the one matching your chip:
+
+```bash
+cargo esp32c6-defmt          # build + flash + monitor with defmt decoding
+cargo esp32c6-defmt-build    # build only, skip flashing
 ```
-runner = "espflash flash --monitor --log-format defmt"
+
+Each defmt alias automatically:
+- drops `println` from the default features and enables `defmt`,
+- appends `-Tdefmt.x` to the linker script set (so the `.defmt` ELF section is emitted),
+- swaps `espflash`'s runner to `espflash flash --monitor --log-format defmt` so log frames are decoded inline.
+
+No edits to `.cargo/config.toml` are required — the aliases pass everything through `cargo --config` overrides at invocation time. If you want to invoke `cargo build` directly (e.g. in CI), the equivalent is:
+
+```bash
+cargo build --release \
+  --no-default-features \
+  --features esp32c6,defmt,no-std,auto,statistics \
+  --target riscv32imac-unknown-none-elf \
+  --config 'target.riscv32imac-unknown-none-elf.rustflags=["-C", "link-arg=-Tdefmt.x"]'
 ```
-2.  **Linker Flags are Included:** In `.cargo/config.toml` make sure that `"-C link-arg=-Tdefmt.x"` is added to `rustflags` as follows:
-```
-rustflags = [
-  "-C",
-  "link-arg=-Tlinkall.x",
-  "-C", 
-  "link-arg=-Tdefmt.x",
-]
+
+Xtensa targets (`esp32`, `esp32s3`) need the `-Wl,` prefix on the link arg because their toolchain goes through a GCC linker driver:
+
+```bash
+--config 'target.xtensa-esp32s3-none-elf.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]'
 ```
 
 ## Documentation
@@ -295,7 +311,7 @@ This CLI is built around the esp-csi-rs crate. You can find full documentation f
 This crate is still in early development and currently supports `no-std` only. Contributions and suggestions are welcome!
 
 ## License
-Copyright 2026 The Embedded Rustacean
+Copyright 2026 The esp-csi Team
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
