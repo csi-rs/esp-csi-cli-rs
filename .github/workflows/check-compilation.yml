@@ -1,4 +1,4 @@
-name: Check Compilation for Chips (Default Features)
+name: Check Compilation for Chips
 
 on:
   push:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   compile:
-    name: ${{ matrix.chip.feature }} (${{ matrix.chip.target }})
+    name: ${{ matrix.chip.feature }}${{ matrix.flavor.label }} (${{ matrix.chip.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,18 +22,34 @@ jobs:
           - feature: esp32
             target: xtensa-esp32-none-elf
             toolchain: esp
-          - feature: esp32c2
-            target: riscv32imc-unknown-none-elf
-            toolchain: stable
+            arch: xtensa
           - feature: esp32c3
             target: riscv32imc-unknown-none-elf
             toolchain: stable
+            arch: riscv
+          - feature: esp32c5
+            target: riscv32imac-unknown-none-elf
+            toolchain: stable
+            arch: riscv
           - feature: esp32c6
             target: riscv32imac-unknown-none-elf
             toolchain: stable
+            arch: riscv
           - feature: esp32s3
             target: xtensa-esp32s3-none-elf
             toolchain: esp
+            arch: xtensa
+        flavor:
+          # Default features: println logging, auto serial, statistics on.
+          - label: ""
+            extra_features: ""
+            no_default_features: ""
+          # defmt logging path: drops `println`, opts into `defmt`. Linker
+          # script flag `-Tdefmt.x` is appended via --config (mirrors the
+          # `*-defmt-build` cargo aliases in `.cargo/config.toml`).
+          - label: " (defmt)"
+            extra_features: "defmt,no-std,auto,statistics"
+            no_default_features: "--no-default-features"
 
     steps:
       - name: Checkout
@@ -49,5 +65,30 @@ jobs:
           RUSTUP_PERMIT_COPY_RENAME: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
 
-      - name: Check ${{ matrix.chip.feature }} with default features
-        run: cargo +${{ matrix.chip.toolchain }} check --locked --release --target ${{ matrix.chip.target }} --features ${{ matrix.chip.feature }}
+      - name: Check ${{ matrix.chip.feature }}${{ matrix.flavor.label }}
+        env:
+          # Empty for the default flavor; the defmt flavor sets a target-
+          # specific `--config` override that appends `-Tdefmt.x`. Xtensa
+          # builds need the `-Wl,` GCC-driver wrapper; RISC-V doesn't.
+          DEFMT_CONFIG_RISCV: '--config target.${{ matrix.chip.target }}.rustflags=["-C", "link-arg=-Tdefmt.x"]'
+          DEFMT_CONFIG_XTENSA: '--config target.${{ matrix.chip.target }}.rustflags=["-C", "link-arg=-Wl,-Tdefmt.x"]'
+        run: |
+          set -euxo pipefail
+          if [ "${{ matrix.flavor.label }}" = " (defmt)" ]; then
+            if [ "${{ matrix.chip.arch }}" = "xtensa" ]; then
+              EXTRA="$DEFMT_CONFIG_XTENSA"
+            else
+              EXTRA="$DEFMT_CONFIG_RISCV"
+            fi
+            FEATURES="${{ matrix.chip.feature }},${{ matrix.flavor.extra_features }}"
+          else
+            EXTRA=""
+            FEATURES="${{ matrix.chip.feature }}"
+          fi
+
+          cargo +${{ matrix.chip.toolchain }} check \
+            --locked --release \
+            --target ${{ matrix.chip.target }} \
+            ${{ matrix.flavor.no_default_features }} \
+            --features "$FEATURES" \
+            $EXTRA
