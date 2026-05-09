@@ -2,7 +2,8 @@ use core::cell::RefCell;
 use core::sync::atomic::AtomicBool;
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, blocking_mutex::Mutex, signal::Signal};
-use esp_csi_rs::{CollectionMode, config::CsiConfig};
+use esp_csi_rs::{CollectionMode, IOTaskConfig, config::CsiConfig};
+use esp_radio::esp_now::WifiPhyRate;
 use heapless::String;
 
 use crate::NodeMode;
@@ -13,6 +14,10 @@ use crate::NodeMode;
 pub static START_SIGNAL: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
 /// Signals the main loop that CSI collection has ended; set by the collection task.
 pub static DONE_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Set by the main loop when the user presses the stop key during collection.
+/// Observed by the `csi_collection` task, which then calls `CSINodeClient::send_stop()`
+/// to unwind `run`/`run_duration` through esp-csi-rs's internal stop signal.
+pub static STOP_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// True while CSI collection is active; the main loop locks the CLI when set.
 pub static IS_COLLECTING: AtomicBool = AtomicBool::new(false);
 
@@ -36,6 +41,14 @@ pub struct UserConfig {
     pub csi_config: CsiConfig,
     /// WiFi channel to operate on (1–14).
     pub channel: u8,
+    /// Wi-Fi PHY rate. Only meaningful for ESP-NOW modes (sniffer/station
+    /// derive their rate from the AP / radio configuration).
+    pub phy_rate: WifiPhyRate,
+    /// Per-direction task enables. Disabling RX turns the node into a
+    /// pure transmitter (useful for asymmetric topologies); disabling
+    /// TX turns it into a pure receiver (useful when the device is the
+    /// passive end of an ESP-NOW pair).
+    pub io_tasks: IOTaskConfig,
 }
 
 impl core::fmt::Debug for UserConfig {
@@ -52,6 +65,8 @@ impl core::fmt::Debug for UserConfig {
             .field("sta_password", &self.sta_password)
             .field("csi_config", &self.csi_config)
             .field("channel", &self.channel)
+            .field("phy_rate", &self.phy_rate)
+            .field("io_tasks", &self.io_tasks)
             .finish()
     }
 }
@@ -59,15 +74,17 @@ impl core::fmt::Debug for UserConfig {
 impl UserConfig {
     /// Creates a [`UserConfig`] populated with sensible defaults:
     ///
-    /// | Field             | Default            |
-    /// |-------------------|--------------------|
-    /// | `node_mode`       | `WifiSniffer`      |
-    /// | `collection_mode` | `Collector`        |
-    /// | `trigger_freq`    | `100` Hz           |
-    /// | `sta_ssid`        | *(empty)*          |
-    /// | `sta_password`    | *(empty)*          |
+    /// | Field             | Default                |
+    /// |-------------------|------------------------|
+    /// | `node_mode`       | `WifiSniffer`          |
+    /// | `collection_mode` | `Collector`            |
+    /// | `trigger_freq`    | `100` Hz               |
+    /// | `sta_ssid`        | *(empty)*              |
+    /// | `sta_password`    | *(empty)*              |
     /// | `csi_config`      | `CsiConfig::default()` |
-    /// | `channel`         | `1`                |
+    /// | `channel`         | `1`                    |
+    /// | `phy_rate`        | `WifiPhyRate::RateMcs0Lgi` |
+    /// | `io_tasks`        | TX + RX both enabled   |
     pub fn new() -> Self {
         UserConfig {
             node_mode: NodeMode::WifiSniffer,
@@ -77,6 +94,8 @@ impl UserConfig {
             sta_password: String::new(),
             csi_config: CsiConfig::default(),
             channel: 1,
+            phy_rate: WifiPhyRate::RateMcs0Lgi,
+            io_tasks: IOTaskConfig::default(),
         }
     }
 }
