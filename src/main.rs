@@ -25,14 +25,16 @@ use cli::{Context, ROOT_MENU};
 use cli::SerialInterface;
 use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either3};
+use embassy_time::{Duration, Timer};
 use embedded_io::Write;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::logging::logging::{init_logger, LogMode};
+use esp_csi_rs::csi::CSIDataPacket;
+use esp_csi_rs::logging::logging::{init_logger, log_csi, LogMode};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node, PeripheralOpMode,
-    WifiSnifferConfig, WifiStationConfig,
+    set_csi_callback, set_csi_logging_enabled, CSINode, CSINodeClient, CSINodeHardware,
+    CentralOpMode, EspNowConfig, Node, PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -59,6 +61,99 @@ use alloc::string::ToString;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
+
+/// Synchronously drain any pending byte from the USB-Serial-JTAG OUT FIFO via
+/// raw register reads, returning `true` if a 'q'/'Q' is found in the burst.
+///
+/// Why bypass the async path: under heavy CSI traffic the WiFi/CSI ISR
+/// pressure and `esp_println`'s critical sections starve the
+/// `embedded_io_async::Read::read` waker on the JTAG peripheral, making the
+/// CLI's interrupt-driven stop key probabilistic. The OUT-EP data-avail bit
+/// in `EP1_CONF` and the FIFO read at `EP1` are exactly what esp-hal's own
+/// `read_byte` polls — reading them here from the periodic CLI tick guarantees
+/// the byte gets pulled out regardless of waker delivery.
+///
+/// Addresses match esp-println's `serial_jtag_printer` const block, which has
+/// been verified for these chips.
+#[cfg(all(
+    any(
+        feature = "esp32c3",
+        feature = "esp32c5",
+        feature = "esp32c6",
+        feature = "esp32s3"
+    ),
+    feature = "auto"
+))]
+fn jtag_peek_for_stop() -> bool {
+    #[cfg(feature = "esp32c3")]
+    const EP1: *mut u32 = 0x6004_3000 as *mut u32;
+    #[cfg(feature = "esp32c3")]
+    const EP1_CONF: *const u32 = 0x6004_3004 as *const u32;
+
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    const EP1: *mut u32 = 0x6000_F000 as *mut u32;
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    const EP1_CONF: *const u32 = 0x6000_F004 as *const u32;
+
+    #[cfg(feature = "esp32s3")]
+    const EP1: *mut u32 = 0x6003_8000 as *mut u32;
+    #[cfg(feature = "esp32s3")]
+    const EP1_CONF: *const u32 = 0x6003_8004 as *const u32;
+
+    // `serial_out_ep_data_avail` is bit 2 of EP1_CONF on these chips.
+    const DATA_AVAIL: u32 = 0b100;
+
+    let mut found = false;
+    let mut guard = 64; // Bound the loop at the OUT-EP buffer size.
+    while guard > 0 {
+        guard -= 1;
+        let conf = unsafe { EP1_CONF.read_volatile() };
+        if conf & DATA_AVAIL == 0 {
+            break;
+        }
+        let byte = unsafe { EP1.read_volatile() } as u8;
+        if byte == b'q' || byte == b'Q' {
+            found = true;
+        }
+    }
+    found
+}
+
+/// Stub for build configurations that don't use the JTAG-auto path. The CLI
+/// inner loop falls back to the async-read arm in those cases.
+#[cfg(not(all(
+    any(
+        feature = "esp32c3",
+        feature = "esp32c5",
+        feature = "esp32c6",
+        feature = "esp32s3"
+    ),
+    feature = "auto"
+)))]
+fn jtag_peek_for_stop() -> bool {
+    false
+}
+
+/// CSI delivery callback registered via `esp_csi_rs::set_csi_callback` for the
+/// duration of each `start` run. Runs synchronously inside the WiFi callback
+/// context for every captured packet, which is the only path guaranteed to
+/// fire even when the embassy executor and RX-interrupt waker are starved by
+/// `esp_println`'s critical sections during sustained CSI bursts.
+///
+/// Two responsibilities, in order:
+/// 1. Drain the USB-Serial-JTAG OUT-EP FIFO via raw register reads and signal
+///    `STOP_REQUEST` if 'q'/'Q' is present. This is the deterministic stop-key
+///    path — packet rate is the polling rate.
+/// 2. Clone the packet and hand it to `log_csi` so the user keeps seeing the
+///    CSI line stream they had before. The clone is ~640 B (`Vec<i8, 612>`
+///    inline + metadata) and amounts to the same work the inline-log path
+///    used to do, just under our control.
+fn csi_log_and_check(packet: &CSIDataPacket) {
+    if jtag_peek_for_stop() {
+        STOP_REQUEST.signal(());
+    }
+    log_csi(packet.clone());
+}
 
 /// Walk the per-line shadow buffer and return the open quote char, if any.
 ///
@@ -228,22 +323,46 @@ async fn main(spawner: Spawner) -> ! {
         if IS_COLLECTING.load(Ordering::Relaxed) {
             // Erase the spurious "> " the menu crate printed after the command returned
             Write::write_all(&mut runner.interface, b"\r\x1b[2K").ok();
-            // CLI locked during collection: only 'q'/'Q' triggers an early stop;
-            // every other byte is discarded until DONE_SIGNAL fires.
+            // CLI locked during collection: only 'q'/'Q' triggers an early stop.
+            //
+            // Two parallel paths read the host byte stream:
+            //   1. The async `Read::read` arm, which wakes on the JTAG RX
+            //      interrupt (fast path when interrupts aren't being starved).
+            //   2. A 5 ms Timer arm that calls `jtag_peek_for_stop` — a raw
+            //      register poll of the USB-Serial-JTAG OUT-EP FIFO. This
+            //      bypasses the async waker entirely and guarantees the byte
+            //      is pulled even when the WiFi/CSI ISR storm + esp-println's
+            //      critical sections suppress the RX interrupt.
+            //
+            // The two paths are race-safe: whichever sees the byte first wins,
+            // signals STOP_REQUEST, and the other arm is dropped on the next
+            // loop iteration (a fresh Read::read will simply see an empty FIFO).
+            //
+            // 32-byte chunk because USB-CDC delivers whole packets — a single
+            // 'q' may share a packet with CR/LF.
+            let mut chunk = [0_u8; 32];
             loop {
-                match select(
-                    embedded_io_async::Read::read(&mut runner.interface, &mut buf),
+                match select3(
+                    embedded_io_async::Read::read(&mut runner.interface, &mut chunk),
                     DONE_SIGNAL.wait(),
+                    Timer::after(Duration::from_millis(5)),
                 )
                 .await
                 {
-                    Either::First(_) => {
-                        if buf[0] == b'q' || buf[0] == b'Q' {
+                    Either3::First(res) => {
+                        let n = res.unwrap_or(0);
+                        if chunk[..n].iter().any(|&b| b == b'q' || b == b'Q') {
                             STOP_REQUEST.signal(());
                             Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n").ok();
                         }
                     }
-                    Either::Second(_) => break, // collection ended
+                    Either3::Second(_) => break, // collection ended
+                    Either3::Third(_) => {
+                        if jtag_peek_for_stop() {
+                            STOP_REQUEST.signal(());
+                            Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n").ok();
+                        }
+                    }
                 }
             }
             IS_COLLECTING.store(false, Ordering::Relaxed);
@@ -439,27 +558,28 @@ async fn csi_collection(
             core::future::pending::<()>().await
         };
 
+        // Route CSI delivery through our own callback for this run. The callback
+        // peeks the JTAG RX FIFO synchronously per packet and writes the CSI
+        // line, giving us a deterministic q-key stop path that doesn't depend
+        // on the embassy executor or RX interrupt — both of which get starved
+        // by the WiFi/CSI hot path. `reset_globals` at the end of run/run_duration
+        // nulls CSI_CALLBACK and the gates back to Off, so re-registering on
+        // each iteration of this task is correct.
+        set_csi_logging_enabled(false);
+        set_csi_callback(csi_log_and_check);
+
         // Run for a fixed duration or indefinitely. In both arms run_duration/run
         // listens to esp-csi-rs's internal STOP_SIGNAL, so send_stop() unwinds them.
+        // Note: with Callback delivery the async CSI queue is never written, so
+        // the indefinite arm cannot use `print_csi_w_metadata` (it would park
+        // forever). The callback is the sole writer.
         match duration {
             Some(secs) => {
                 let mut client = CSINodeClient::new();
                 select(node.run_duration(secs, &mut client), stop_watcher).await;
             }
             None => {
-                let mut client = CSINodeClient::new();
-                let collection = async {
-                    select(
-                        node.run(),
-                        async {
-                            loop {
-                                client.print_csi_w_metadata().await;
-                            }
-                        },
-                    )
-                    .await;
-                };
-                select(collection, stop_watcher).await;
+                select(node.run(), stop_watcher).await;
             }
         }
 
