@@ -308,9 +308,21 @@ async fn main(spawner: Spawner) -> ! {
                 // next line), reset shadow, then forward to menu so it can
                 // process the command. menu emits its own newline + command
                 // echo + prompt afterwards (its `not(echo)` branch handles it).
+                //
+                // On `\r` we erase the input line first: menu 0.6.1 in
+                // `not(feature = "echo")` mode unconditionally writes `\r`
+                // followed by the buffered command (lib.rs:401-406). Without
+                // erasing first, that overwrites only the leftmost N chars of
+                // our already-echoed `> command`, leaving the trailing chars
+                // of the prompt visible (e.g. "> info" → "infofo"). `\n` is
+                // stripped by menu's input_byte and must not trigger the
+                // erase, otherwise the prompt menu just printed gets wiped.
                 (b'\r' | b'\n', _) => {
                     quote_char = None;
                     shadow.clear();
+                    if b == b'\r' {
+                        Write::write_all(&mut runner.interface, b"\r\x1b[2K").ok();
+                    }
                     runner.input_byte(b, &mut context);
                 }
                 // Every other byte: echo, forward, push to shadow.

@@ -215,6 +215,20 @@ This is a list of commands available through the CLI interface:
         * `set-csi-delivery --mode=async`
         * `set-csi-delivery --mode=off --logging=off`
 
+* **`info`**
+    * Description: Print a machine-parseable firmware identification block. Intended for host-side tooling that needs to verify which firmware is running on the device. The first line — `ESP-CSI-CLI/<version>` — is also emitted at the top of the welcome banner on every reset, so a host can identify the firmware passively without sending this command.
+    * Output format:
+        ```
+        ESP-CSI-CLI/<version>
+        name=esp-csi-cli-rs
+        version=<version>
+        chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
+        protocol=<u32>
+        features=<comma-separated-list>
+        END-INFO
+        ```
+    * Example: `info`
+
 * **`show-stats`** *(requires `statistics` feature, on by default)*
     * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, RX dropped packets, one-way and two-way ESP-NOW latency. Counters reset on the start of each new `start` collection.
     * Example: `show-stats`
