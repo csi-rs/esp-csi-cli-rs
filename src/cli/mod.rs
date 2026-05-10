@@ -6,7 +6,7 @@ use cli::{enter_root};
 use menu::{Item, ItemType, Menu, Parameter};
 
 use crate::cli::cmds::{
-    reset_config, set_collection_mode, set_csi, set_csi_delivery_cmd, set_io_tasks_cmd,
+    cli_info, reset_config, set_collection_mode, set_csi, set_csi_delivery_cmd, set_io_tasks_cmd,
     set_log_mode, set_phy_rate, set_traffic, set_wifi, show_config, start_csi_collect,
 };
 #[cfg(feature = "statistics")]
@@ -360,6 +360,35 @@ Description:
 
   Use this before `start` to verify the configuration that the next collection
   run will snapshot."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: cli_info,
+                parameters: &[],
+            },
+            command: "info",
+            help: Some("info - Print firmware identification metadata.
+
+Usage:
+  info
+
+Description:
+  Prints a machine-parseable identification block for host-side tooling
+  that needs to verify which firmware is running on the device.
+
+Output format:
+  ESP-CSI-CLI/<version>
+  name=esp-csi-cli-rs
+  version=<version>
+  chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
+  protocol=<u32>
+  features=<comma-separated-list>
+  END-INFO
+
+  The same magic line `ESP-CSI-CLI/<version>` is also printed at the top
+  of the welcome banner on every reset, so a host can identify the
+  firmware passively without sending this command. The `protocol` field
+  bumps on any breaking change to this grammar."),
         },
         &Item {
             item_type: ItemType::Callback {

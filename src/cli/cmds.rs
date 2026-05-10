@@ -15,6 +15,11 @@ use menu::{Item, Menu, argument_finder};
 
 use crate::{NodeMode, cli::{Context, SerialInterface}, config::{IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig}};
 
+/// Wire-format version of the firmware identification block emitted by
+/// [`cli_info`] and the welcome banner. Bump on any breaking change to the
+/// `info` grammar so host-side tooling can refuse incompatible firmware.
+pub const CLI_PROTOCOL_VERSION: u32 = 1;
+
 /// CLI command: `set-traffic`
 ///
 /// Configures the CSI traffic generation frequency stored in [`USER_CONFIG`].
@@ -989,6 +994,76 @@ pub fn set_csi_delivery_cmd<'a>(
             }
         }
     }
+}
+
+/// CLI command: `info`
+///
+/// Prints a machine-parseable firmware identification block for host-side
+/// tooling. The first line is the magic string `ESP-CSI-CLI/<version>` (also
+/// emitted at the top of the welcome banner on reset). Subsequent lines are
+/// `key=value` pairs terminated by a sentinel `END-INFO` line.
+///
+/// Format (stable; bump [`CLI_PROTOCOL_VERSION`] on breaking changes):
+///
+/// ```text
+/// ESP-CSI-CLI/<version>
+/// name=esp-csi-cli-rs
+/// version=<version>
+/// chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
+/// protocol=<u32>
+/// features=<comma-separated-list>
+/// END-INFO
+/// ```
+pub fn cli_info<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    _item: &Item<SerialInterface, Context>,
+    _args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+
+    let chip = if cfg!(feature = "esp32") {
+        "esp32"
+    } else if cfg!(feature = "esp32c3") {
+        "esp32c3"
+    } else if cfg!(feature = "esp32c5") {
+        "esp32c5"
+    } else if cfg!(feature = "esp32c6") {
+        "esp32c6"
+    } else if cfg!(feature = "esp32s3") {
+        "esp32s3"
+    } else {
+        "unknown"
+    };
+
+    let mut features: heapless::String<128> = heapless::String::new();
+    macro_rules! push_feat {
+        ($name:literal) => {
+            if cfg!(feature = $name) {
+                if !features.is_empty() {
+                    let _ = features.push(',');
+                }
+                let _ = features.push_str($name);
+            }
+        };
+    }
+    push_feat!("statistics");
+    push_feat!("defmt");
+    push_feat!("println");
+    push_feat!("async-print");
+    push_feat!("auto");
+    push_feat!("jtag-serial");
+    push_feat!("uart");
+
+    writeln!(serial, "ESP-CSI-CLI/{}", version).unwrap();
+    writeln!(serial, "name={}", name).unwrap();
+    writeln!(serial, "version={}", version).unwrap();
+    writeln!(serial, "chip={}", chip).unwrap();
+    writeln!(serial, "protocol={}", CLI_PROTOCOL_VERSION).unwrap();
+    writeln!(serial, "features={}", features).unwrap();
+    writeln!(serial, "END-INFO").unwrap();
 }
 
 /// CLI command: `show-stats` (compiled in only with the `statistics` feature)
