@@ -96,7 +96,7 @@ checksum = "211713d2e9fb4793ce4360a712c0764264aff6be48932ccf02ca2a331c0436a9"
 dependencies = [
  "btuuid",
  "defmt 1.0.1",
- "embassy-sync 0.7.2",
+ "embassy-sync 0.8.0",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "futures-intrusive",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-cli-rs"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "embassy-executor",
  "embassy-futures",
@@ -832,9 +832,9 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50bd58c9e2acff584fcf2b3152c348014fb3041b23411c0b41f4d7606d981b25"
+checksum = "49e8228be770129bb59813b4dee432350b2f1a0824621c1935ec4c30c1b432bb"
 dependencies = [
  "defmt 1.0.1",
  "document-features",

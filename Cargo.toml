@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 
 [features]
@@ -84,7 +84,7 @@ embassy-time = { version = "0.5.0" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { version = "0.6.0", default-features = false }
+esp-csi-rs = { version = "0.6.1", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint
