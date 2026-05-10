@@ -325,7 +325,7 @@ This CLI is built around the esp-csi-rs crate. You can find full documentation f
 This crate is still in early development and currently supports `no-std` only. Contributions and suggestions are welcome!
 
 ## License
-Copyright 2026 The esp-csi Team
+Copyright 2026 The csi-rs Team
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

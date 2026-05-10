@@ -341,6 +341,12 @@ async fn main(spawner: Spawner) -> ! {
             // 32-byte chunk because USB-CDC delivers whole packets — a single
             // 'q' may share a packet with CR/LF.
             let mut chunk = [0_u8; 32];
+            // Latch so the `Stopping...` line prints once per run. Without
+            // this, every subsequent 'q' the host pushes (or every key repeat
+            // while the user holds it) re-fires the print before
+            // `DONE_SIGNAL` arrives, producing a wall of duplicates.
+            // Re-signalling `STOP_REQUEST` itself is harmless and idempotent.
+            let mut stop_announced = false;
             loop {
                 match select3(
                     embedded_io_async::Read::read(&mut runner.interface, &mut chunk),
@@ -353,14 +359,22 @@ async fn main(spawner: Spawner) -> ! {
                         let n = res.unwrap_or(0);
                         if chunk[..n].iter().any(|&b| b == b'q' || b == b'Q') {
                             STOP_REQUEST.signal(());
-                            Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n").ok();
+                            if !stop_announced {
+                                Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
+                                    .ok();
+                                stop_announced = true;
+                            }
                         }
                     }
                     Either3::Second(_) => break, // collection ended
                     Either3::Third(_) => {
                         if jtag_peek_for_stop() {
                             STOP_REQUEST.signal(());
-                            Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n").ok();
+                            if !stop_announced {
+                                Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
+                                    .ok();
+                                stop_announced = true;
+                            }
                         }
                     }
                 }
