@@ -241,11 +241,16 @@ async fn main(spawner: Spawner) -> ! {
     let mut context = Context::default();
 
     let serial = {
-        // ESP32: Always UART
+        // ESP32: Always UART. esp-hal's `UartBuilder::new` ties the RX signal
+        // to a constant logic-high until `with_rx` is called, so without
+        // explicit GPIO3 assignment the UART never sees any incoming bytes
+        // (TX works because the ROM bootloader already wired U0TXD → GPIO1).
         #[cfg(feature = "esp32")]
         {
             Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
                 .unwrap()
+                .with_rx(peripherals.GPIO3)
+                .with_tx(peripherals.GPIO1)
                 .into_async()
         }
 
