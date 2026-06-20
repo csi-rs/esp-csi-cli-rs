@@ -12,11 +12,17 @@ use crate::cli::cmds::{
 #[cfg(feature = "statistics")]
 use crate::cli::cmds::show_stats;
 pub use crate::cli::serial::SerialInterface;
-#[cfg(any(
-    feature = "esp32c3",
-    feature = "esp32c5",
-    feature = "esp32c6",
-    feature = "esp32s3"
+// `is_jtag` is only compiled under `auto` (see serial.rs); match that gating
+// here so forced `jtag-serial`/`uart` builds don't try to re-export a fn that
+// doesn't exist.
+#[cfg(all(
+    feature = "auto",
+    any(
+        feature = "esp32c3",
+        feature = "esp32c5",
+        feature = "esp32c6",
+        feature = "esp32s3"
+    )
 ))]
 pub use crate::cli::serial::is_jtag;
 
@@ -273,6 +279,16 @@ configurations if necessary."),
                         argument_name: "wifichannel",
                         help: Some("Specify the channel"),
                     },
+                    Parameter::NamedValue {
+                        parameter_name: "peer-mac",
+                        argument_name: "peermac",
+                        help: Some("ESP-NOW explicit peer MAC (aa:bb:cc:dd:ee:ff); empty clears"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ht40",
+                        argument_name: "ht40",
+                        help: Some("ESP-NOW forced HT40 TX PHY: above|below|none"),
+                    },
                 ],
             },
             command: "set-wifi",
@@ -290,10 +306,16 @@ Options:
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
   --set-channel=<NUMBER>                                        Set the channel (default: 1).
+  --peer-mac=<aa:bb:cc:dd:ee:ff>                                ESP-NOW: explicit peer MAC. Switches off automatic
+                                                                magic-prefix pairing for per-node source-MAC filtering.
+                                                                Pass an empty value to clear (back to auto pairing).
+  --ht40=<above|below|none>                                     ESP-NOW: force the per-peer TX PHY to HT40 with the
+                                                                given secondary channel (default: none = HT20/legacy).
 
 Examples:
   set-wifi --mode=sniffer
   set-wifi --mode=station --sta-ssid='My WiFi' --sta-password='my pass'
+  set-wifi --mode=esp-now-central --peer-mac=aa:bb:cc:dd:ee:ff --ht40=above
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
@@ -301,7 +323,8 @@ Description:
       - `station`: Connect to an existing WiFi network.
       - `sniffer`: Monitor WiFi traffic passively.
       - `esp-now-central`: Act as a central device in ESP-NOW communication.
-      - `esp-now-peripheral`: Act as a peripheral device in ESP-NOW communication."),
+      - `esp-now-peripheral`: Act as a peripheral device in ESP-NOW communication.
+  - ESP-NOW options (`--peer-mac`, `--ht40`) only take effect in ESP-NOW modes."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -479,7 +502,7 @@ Description:
                     Parameter::NamedValue {
                         parameter_name: "mode",
                         argument_name: "mode",
-                        help: Some("Delivery: off|callback|async"),
+                        help: Some("Delivery: off|callback|async|raw"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "logging",
@@ -492,19 +515,24 @@ Description:
             help: Some("set-csi-delivery - Switch CSI delivery mode at runtime.
 
 Usage:
-  set-csi-delivery [--mode=<off|callback|async>] [--logging=<on|off>]
+  set-csi-delivery [--mode=<off|callback|async|raw>] [--logging=<on|off>]
 
 Options:
   --mode=off        No user delivery. Inline `log_csi` may still run.
   --mode=callback   Dispatch to the registered set_csi_callback hook.
   --mode=async      Queue packets for CSINodeClient::next_csi_packet (default
                     used by the CLI's indefinite collection path).
+  --mode=raw        Zero-copy CPU-benchmark fast-path: the WiFi callback returns
+                    before building the CSIDataPacket, so no CSI data is
+                    delivered or logged. Applies on the next `start` (no q-key
+                    stop), and also skips ESP-NOW control-packet ingest.
   --logging=on/off  Toggle the per-packet UART/JTAG `log_csi` gate
                     independently of delivery mode.
 
 Examples:
   set-csi-delivery --mode=async
   set-csi-delivery --mode=off --logging=off
+  set-csi-delivery --mode=raw
 
 Description:
   These two flags control the WiFi-callback dispatch path. The two delivery
@@ -531,7 +559,7 @@ Description:
   - RX/TX PPS averages
   - RX/TX rate in Hz
   - RX dropped packets
-  - One-way and two-way ESP-NOW latency
+  - ESP-NOW TX queued / confirmed / failed counts
 
   Counters reset on the start of each new `start` collection."),
         },

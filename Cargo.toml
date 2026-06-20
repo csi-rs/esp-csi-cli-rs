@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 
 [features]
@@ -11,18 +11,35 @@ no-std = []
 println = ["esp-csi-rs/println", "esp-backtrace/println"]
 ## Automatically select the best available backend for the target.
 auto = ["esp-csi-rs/auto"]
-## Non-blocking async logging. This is an unstable feature and may cause unexpected behavior. Use with caution.
+## Non-blocking async logging: packet serialization/output is delegated to an
+## async driver so heavy I/O never blocks the executor. Keeping logging
+## non-blocking is critical for collection throughput — it prevents dropped CSI
+## packets under load. Enabled automatically by `jtag-serial` (see below). When
+## set on its own it is unstable; combine it with `jtag-serial`, not `uart`.
 async-print = ["esp-csi-rs/async-print"]
-## Expose runtime PPS / latency / drop counters via the `show-stats` command.
+## Expose runtime PPS / rate / drop + ESP-NOW TX counters via the `show-stats` command.
 statistics = ["esp-csi-rs/statistics"]
-## Enable logging via defmt.
+## Enable logging via defmt (lowest device-to-host transfer overhead).
+## NOTE: incompatible with `async-print` — both register a defmt `#[global_logger]`,
+## so the two together fail to link (`_defmt_acquire` multiply defined). Since
+## `jtag-serial` forces `async-print`, `defmt` cannot be combined with
+## `jtag-serial`; use `defmt` with `auto` (the `*-defmt` cargo aliases) instead.
 defmt = [
     "esp-csi-rs/defmt",
     "esp-backtrace/defmt",
 ]
-## Force the JTAG backend for logging.
-jtag-serial = ["esp-csi-rs/jtag-serial"]
+## Force the JTAG backend for logging. Pulls in `async-print` (non-blocking
+## logging), which is mandatory here: the JTAG backend can block under sustained
+## CSI load, and a blocked log write stalls the collection hot path and drops
+## packets. This is the recommended setup for maximum collection throughput with
+## `println`/serialized output. This mirrors esp-csi-rs 0.7.0, where
+## `esp-csi-rs/jtag-serial` itself enables `esp-csi-rs/async-print`; the explicit
+## `async-print` here keeps this crate's own feature flag in sync.
+## NOTE: do not combine with `defmt` (see the `defmt` feature above).
+jtag-serial = ["esp-csi-rs/jtag-serial", "async-print"]
 ## Force the UART backend for logging (not recommended, much slower than JTAG backend).
+## Do NOT combine with `async-print`: UART is already blocking and slow, so the
+## async path adds overhead without benefit (and risks unexpected behavior).
 uart = ["esp-csi-rs/uart"]
 
 ## Support for the ESP32
@@ -69,7 +86,7 @@ embedded-io-async = "0.7.0"
 # 0.7 version of embedded-io, exposed under an alias because the workspace
 # also pulls in 0.6.1 for the `menu` crate (still on 0.6.x). Both crates need
 # their own ErrorType/Write impls on `SerialInterface`.
-embedded-io-07 = { package = "embedded-io", version = "0.7.0" }
+embedded-io-07 = { package = "embedded-io", version = "0.7.1" }
 esp-radio = { version = "0.18.0", default-features = false, optional = false, features = [
     "wifi",
     "sniffer",
@@ -78,13 +95,13 @@ esp-radio = { version = "0.18.0", default-features = false, optional = false, fe
     "esp-now",
     "csi",
 ] }
-heapless = { version = "0.7", default-features = false }
+heapless = { version = "0.9.3", default-features = false }
 embassy-executor = { version = "0.10.0" }
-embassy-time = { version = "0.5.0" }
+embassy-time = { version = "0.5.1" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { git = "https://github.com/csi-rs/esp-csi-rs", rev = "d17ba572cab518ce5da3f9fcdbacc06a84ab1c11", default-features = false }
+esp-csi-rs = { version = "0.7.0", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint

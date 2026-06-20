@@ -5,11 +5,18 @@ mod cli;
 mod config;
 
 use crate::config::{UserConfig, DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, STOP_REQUEST, USER_CONFIG};
-#[cfg(any(
-    feature = "esp32c3",
-    feature = "esp32c5",
-    feature = "esp32c6",
-    feature = "esp32s3"
+// `is_jtag` only exists under runtime auto-detection (`auto`); forced
+// `jtag-serial`/`uart` backends know their transport at compile time and never
+// call it. Gate the import to match its definition so forced-backend builds
+// (e.g. `defmt` + `jtag-serial`) compile.
+#[cfg(all(
+    feature = "auto",
+    any(
+        feature = "esp32c3",
+        feature = "esp32c5",
+        feature = "esp32c6",
+        feature = "esp32s3"
+    )
 ))]
 use cli::is_jtag;
 use cli::{Context, ROOT_MENU};
@@ -33,8 +40,9 @@ use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::csi::CSIDataPacket;
 use esp_csi_rs::logging::logging::{init_logger, log_csi, LogMode};
 use esp_csi_rs::{
-    set_csi_callback, set_csi_logging_enabled, CSINode, CSINodeClient, CSINodeHardware,
-    CentralOpMode, EspNowConfig, Node, PeripheralOpMode, WifiSnifferConfig, WifiStationConfig,
+    set_csi_callback, set_csi_logging_enabled, set_csi_raw_callback, set_raw_listen, CSINode,
+    CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node, PeripheralOpMode,
+    WifiSnifferConfig, WifiStationConfig,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -153,6 +161,31 @@ fn csi_log_and_check(packet: &CSIDataPacket) {
         STOP_REQUEST.signal(());
     }
     log_csi(packet.clone());
+}
+
+/// Raw CSI fast-path callback (CPU-benchmark mode). The WiFi callback invokes
+/// this and returns *before* building the ~640 B `CSIDataPacket`, so the
+/// per-frame cost is just the dispatch — matching the ESP-IDF reference. No CSI
+/// data is delivered or logged, and the q-key stop peek of `csi_log_and_check`
+/// is intentionally absent (raw runs are duration-bound / reset-driven).
+fn raw_csi_noop() {}
+
+/// Build the [`EspNowConfig`] for an ESP-NOW run from the user config snapshot.
+///
+/// `with_peer_mac` switches off automatic magic-prefix pairing for explicit
+/// per-node peer filtering; `with_ht40` forces the per-peer TX PHY to HT40.
+/// Both are only applied when the user configured them.
+fn build_espnow_config(user_config: &UserConfig) -> EspNowConfig {
+    let mut cfg = EspNowConfig::default()
+        .with_channel(user_config.channel)
+        .with_phy_rate(user_config.phy_rate);
+    if let Some(mac) = user_config.peer_mac {
+        cfg = cfg.with_peer_mac(mac);
+    }
+    if let Some(secondary) = user_config.ht40_secondary {
+        cfg = cfg.with_ht40(secondary);
+    }
+    cfg
 }
 
 /// Walk the per-line shadow buffer and return the open quote char, if any.
@@ -516,16 +549,12 @@ async fn csi_collection(
                     client_config,
                 }))
             }
-            NodeMode::EspNowCentral => Node::Central(CentralOpMode::EspNow(
-                EspNowConfig::default()
-                    .with_channel(user_config.channel)
-                    .with_phy_rate(user_config.phy_rate),
-            )),
-            NodeMode::EspNowPeripheral => Node::Peripheral(PeripheralOpMode::EspNow(
-                EspNowConfig::default()
-                    .with_channel(user_config.channel)
-                    .with_phy_rate(user_config.phy_rate),
-            )),
+            NodeMode::EspNowCentral => {
+                Node::Central(CentralOpMode::EspNow(build_espnow_config(&user_config)))
+            }
+            NodeMode::EspNowPeripheral => {
+                Node::Peripheral(PeripheralOpMode::EspNow(build_espnow_config(&user_config)))
+            }
         };
 
         // Non-zero trigger_freq enables traffic generation
@@ -585,7 +614,17 @@ async fn csi_collection(
         // nulls CSI_CALLBACK and the gates back to Off, so re-registering on
         // each iteration of this task is correct.
         set_csi_logging_enabled(false);
-        set_csi_callback(csi_log_and_check);
+        if user_config.delivery_raw {
+            // Zero-copy CPU-benchmark path: dispatch only, no packet build, no
+            // logging. Also skip ESP-NOW control-packet ingest so the per-frame
+            // cost matches the ESP-IDF reference. The q-key stop peek is not
+            // available here, so raw runs rely on the duration / reset path.
+            set_raw_listen(true);
+            set_csi_raw_callback(raw_csi_noop);
+        } else {
+            set_raw_listen(false);
+            set_csi_callback(csi_log_and_check);
+        }
 
         // Run for a fixed duration or indefinitely. In both arms run_duration/run
         // listens to esp-csi-rs's internal STOP_SIGNAL, so send_stop() unwinds them.

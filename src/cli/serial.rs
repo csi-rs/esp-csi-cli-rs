@@ -1,3 +1,6 @@
+// `Uart` is only referenced by the ESP32 type alias, the forced-`uart` alias,
+// and the runtime `auto` enum — not by a forced `jtag-serial` build.
+#[cfg(any(feature = "esp32", feature = "uart", feature = "auto"))]
 use esp_hal::uart::Uart;
 #[cfg(any(
     feature = "esp32c3",
