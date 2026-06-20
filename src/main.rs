@@ -268,8 +268,12 @@ async fn main(spawner: Spawner) -> ! {
         csi_collection(interfaces, controller).expect("failed to spawn csi_collection task"),
     );
 
-    // Create a buffer to store CLI input
-    let mut clibuf = [0u8; 256];
+    // Create a buffer to store CLI input. `menu` prints "Buffer overflow!" for
+    // every byte once this is full (lib.rs:446), so we mirror its capacity in
+    // the preprocessor below and stop forwarding before it fills — see
+    // `forwarded`/`CLI_BUF_LEN`.
+    const CLI_BUF_LEN: usize = 256;
+    let mut clibuf = [0u8; CLI_BUF_LEN];
     // Instantiate Context placeholder
     let mut context = Context::default();
 
@@ -352,8 +356,17 @@ async fn main(spawner: Spawner) -> ! {
     // the matching one closes it (allowing the other quote style to appear
     // literally inside the value). Both `'` and `"` are accepted because some
     // serial terminals / keyboard layouts make Shift-' awkward to type.
-    let mut shadow: heapless::Vec<u8, 256> = heapless::Vec::new();
+    let mut shadow: heapless::Vec<u8, CLI_BUF_LEN> = heapless::Vec::new();
     let mut quote_char: Option<u8> = None;
+    // Mirrors `menu`'s internal `used` counter (bytes actually forwarded to
+    // `input_byte`, i.e. printables + the 0x1F space sentinel, *not* swallowed
+    // quote chars). When it reaches `CLI_BUF_LEN` we stop forwarding/echoing so
+    // `menu` never hits its per-byte "Buffer overflow!" path — the user can keep
+    // editing with backspace or submit with Enter, no manual flush required.
+    let mut forwarded: usize = 0;
+    // Latches the one-shot overflow bell so a held key / paste doesn't re-beep
+    // on every dropped byte. Re-armed when space frees (backspace) or on submit.
+    let mut at_capacity = false;
 
     loop {
         let mut buf = [0_u8; 1];
@@ -455,9 +468,18 @@ async fn main(spawner: Spawner) -> ! {
                 // forward 0x1F (US) so menu's whitespace tokenizer doesn't
                 // split. The command handler decodes 0x1F → ' ' on read-back.
                 (b' ', Some(_)) => {
-                    Write::write_all(&mut runner.interface, b" ").ok();
-                    runner.input_byte(0x1F, &mut context);
-                    let _ = shadow.push(0x1F);
+                    if forwarded < CLI_BUF_LEN {
+                        Write::write_all(&mut runner.interface, b" ").ok();
+                        runner.input_byte(0x1F, &mut context);
+                        let _ = shadow.push(0x1F);
+                        forwarded += 1;
+                    } else if !at_capacity {
+                        // Input limit reached: ring the bell once, then drop
+                        // further bytes silently (no echo, no forward) so menu's
+                        // "Buffer overflow!" spam never fires.
+                        Write::write_all(&mut runner.interface, b"\x07").ok();
+                        at_capacity = true;
+                    }
                 }
                 // Backspace / DEL: pop the shadow and erase the corresponding
                 // char. Swallowed quote chars aren't in menu's buffer, so we
@@ -468,10 +490,13 @@ async fn main(spawner: Spawner) -> ! {
                     Some(b'"') | Some(b'\'') => {
                         Write::write_all(&mut runner.interface, b"\x08 \x08").ok();
                         quote_char = recompute_quote_state(&shadow);
+                        at_capacity = false;
                     }
                     Some(_) => {
                         runner.input_byte(b, &mut context);
                         quote_char = recompute_quote_state(&shadow);
+                        forwarded = forwarded.saturating_sub(1);
+                        at_capacity = false;
                     }
                     None => {} // nothing to erase
                 },
@@ -492,15 +517,29 @@ async fn main(spawner: Spawner) -> ! {
                     quote_char = None;
                     shadow.clear();
                     if b == b'\r' {
+                        // `\r` is where menu resets its `used` counter, so reset
+                        // our mirror too. (`\n` is stripped by menu without
+                        // touching `used`, so leave the counter alone there.)
+                        forwarded = 0;
+                        at_capacity = false;
                         Write::write_all(&mut runner.interface, b"\r\x1b[2K").ok();
                     }
                     runner.input_byte(b, &mut context);
                 }
                 // Every other byte: echo, forward, push to shadow.
                 _ => {
-                    Write::write_all(&mut runner.interface, &[b]).ok();
-                    runner.input_byte(b, &mut context);
-                    let _ = shadow.push(b);
+                    if forwarded < CLI_BUF_LEN {
+                        Write::write_all(&mut runner.interface, &[b]).ok();
+                        runner.input_byte(b, &mut context);
+                        let _ = shadow.push(b);
+                        forwarded += 1;
+                    } else if !at_capacity {
+                        // Input limit reached: ring the bell once, then drop
+                        // further bytes silently so menu never spams
+                        // "Buffer overflow!" and no manual flush is needed.
+                        Write::write_all(&mut runner.interface, b"\x07").ok();
+                        at_capacity = true;
+                    }
                 }
             }
         }
