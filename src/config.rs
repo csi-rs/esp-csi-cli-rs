@@ -4,6 +4,7 @@ use core::sync::atomic::AtomicBool;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, blocking_mutex::Mutex, signal::Signal};
 use esp_csi_rs::{CollectionMode, IOTaskConfig, config::CsiConfig};
 use esp_radio::esp_now::WifiPhyRate;
+use esp_radio::wifi::SecondaryChannel;
 use heapless::String;
 
 use crate::NodeMode;
@@ -49,6 +50,21 @@ pub struct UserConfig {
     /// TX turns it into a pure receiver (useful when the device is the
     /// passive end of an ESP-NOW pair).
     pub io_tasks: IOTaskConfig,
+    /// Explicit ESP-NOW peer MAC. `Some(mac)` switches off automatic
+    /// magic-prefix pairing in favor of an explicit per-node peer with
+    /// source-MAC filtering (`EspNowConfig::with_peer_mac`). `None` keeps
+    /// the default automatic pairing. ESP-NOW modes only.
+    pub peer_mac: Option<[u8; 6]>,
+    /// Forced HT40 transmit PHY for ESP-NOW. `Some(Above|Below)` forces the
+    /// per-peer TX PHY to HT40 with the given secondary channel
+    /// (`EspNowConfig::with_ht40`). `None` leaves the PHY at HT20/legacy per
+    /// the selected rate. ESP-NOW modes only.
+    pub ht40_secondary: Option<SecondaryChannel>,
+    /// When `true`, the next collection run registers the zero-copy raw CSI
+    /// fast-path (`set_csi_raw_callback`) instead of the full per-packet
+    /// callback. Intended for CPU-cost benchmarking — no CSI data is delivered
+    /// or logged in this mode. Set via `set-csi-delivery --mode=raw`.
+    pub delivery_raw: bool,
 }
 
 impl core::fmt::Debug for UserConfig {
@@ -56,6 +72,11 @@ impl core::fmt::Debug for UserConfig {
         let collection_mode_str = match self.collection_mode {
             CollectionMode::Collector => "Collector",
             CollectionMode::Listener => "Listener",
+        };
+        let ht40_str = match self.ht40_secondary {
+            Some(SecondaryChannel::Above) => "Above",
+            Some(SecondaryChannel::Below) => "Below",
+            _ => "None",
         };
         f.debug_struct("UserConfig")
             .field("node_mode", &self.node_mode)
@@ -67,6 +88,9 @@ impl core::fmt::Debug for UserConfig {
             .field("channel", &self.channel)
             .field("phy_rate", &self.phy_rate)
             .field("io_tasks", &self.io_tasks)
+            .field("peer_mac", &self.peer_mac)
+            .field("ht40_secondary", &ht40_str)
+            .field("delivery_raw", &self.delivery_raw)
             .finish()
     }
 }
@@ -96,6 +120,9 @@ impl UserConfig {
             channel: 1,
             phy_rate: WifiPhyRate::RateMcs0Lgi,
             io_tasks: IOTaskConfig::default(),
+            peer_mac: None,
+            ht40_secondary: None,
+            delivery_raw: false,
         }
     }
 }

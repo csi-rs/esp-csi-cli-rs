@@ -17,3 +17,6 @@ target/
 #.idea/
 
 specs/
+
+# cachebro local cache
+.cachebro/

@@ -6,10 +6,15 @@ use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::{set_csi_delivery_mode, set_csi_logging_enabled, CsiDeliveryMode};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_one_way_latency, get_pps_rx, get_pps_tx, get_rx_rate_hz,
-    get_total_rx_packets, get_total_tx_packets, get_tx_rate_hz, get_two_way_latency,
+    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_total_rx_packets,
+    get_total_tx_packets, get_tx_rate_hz,
+};
+#[cfg(feature = "statistics")]
+use esp_csi_rs::central::esp_now::{
+    get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
 };
 use esp_radio::esp_now::WifiPhyRate;
+use esp_radio::wifi::SecondaryChannel;
 
 use menu::{Item, Menu, argument_finder};
 
@@ -19,6 +24,21 @@ use crate::{NodeMode, cli::{Context, SerialInterface}, config::{IS_COLLECTING, S
 /// [`cli_info`] and the welcome banner. Bump on any breaking change to the
 /// `info` grammar so host-side tooling can refuse incompatible firmware.
 pub const CLI_PROTOCOL_VERSION: u32 = 1;
+
+/// Parse a MAC address of the form `aa:bb:cc:dd:ee:ff` (also accepting `-`
+/// separators), case-insensitive. Returns `None` on any malformed input.
+fn parse_mac(s: &str) -> Option<[u8; 6]> {
+    let mut bytes = [0u8; 6];
+    let mut count = 0;
+    for part in s.split([':', '-']) {
+        if count >= 6 || part.len() != 2 {
+            return None;
+        }
+        bytes[count] = u8::from_str_radix(part, 16).ok()?;
+        count += 1;
+    }
+    if count == 6 { Some(bytes) } else { None }
+}
 
 /// CLI command: `set-traffic`
 ///
@@ -485,6 +505,8 @@ pub fn set_wifi<'a>(
     let sta_ssid = argument_finder(item, args, "sta-ssid");
     let sta_password = argument_finder(item, args, "sta-password");
     let set_channel = argument_finder(item, args, "set-channel");
+    let peer_mac = argument_finder(item, args, "peer-mac");
+    let ht40 = argument_finder(item, args, "ht40");
 
     match mode {
         Ok(str) => {
@@ -553,6 +575,36 @@ pub fn set_wifi<'a>(
         }
         Err(_) => (),
     }
+    // ESP-NOW explicit peer MAC. An empty value clears it (back to automatic
+    // magic-prefix pairing); a valid MAC switches to per-node peer filtering.
+    if let Ok(Some(s)) = peer_mac {
+        if s.is_empty() {
+            USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().peer_mac = None;
+            });
+        } else if let Some(mac) = parse_mac(s) {
+            USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().peer_mac = Some(mac);
+            });
+        } else {
+            writeln!(serial, "Invalid --peer-mac (use aa:bb:cc:dd:ee:ff)").unwrap();
+        }
+    }
+    // ESP-NOW forced HT40 transmit PHY. `none` reverts to HT20/legacy per rate.
+    if let Ok(Some(s)) = ht40 {
+        match s {
+            "above" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().ht40_secondary = Some(SecondaryChannel::Above);
+            }),
+            "below" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().ht40_secondary = Some(SecondaryChannel::Below);
+            }),
+            "none" | "off" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().ht40_secondary = None;
+            }),
+            _ => writeln!(serial, "Invalid --ht40 (use above|below|none)").unwrap(),
+        }
+    }
 
     writeln!(serial, "\nUpdated WiFi Configuration:\n").unwrap();
     USER_CONFIG.lock(|config| {
@@ -575,6 +627,23 @@ pub fn set_wifi<'a>(
             config.borrow().as_ref().unwrap().sta_password,
         )
         .unwrap();
+        let cfg = config.borrow();
+        let cfg = cfg.as_ref().unwrap();
+        match cfg.peer_mac {
+            Some(m) => writeln!(
+                serial,
+                "ESP-NOW Peer MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+            .unwrap(),
+            None => writeln!(serial, "ESP-NOW Peer MAC: auto").unwrap(),
+        }
+        let ht40_str = match cfg.ht40_secondary {
+            Some(SecondaryChannel::Above) => "HT40 (secondary above)",
+            Some(SecondaryChannel::Below) => "HT40 (secondary below)",
+            _ => "HT20/legacy",
+        };
+        writeln!(serial, "ESP-NOW TX PHY: {}", ht40_str).unwrap();
     });
 }
 
@@ -759,6 +828,21 @@ pub fn show_config<'a>(
         writeln!(serial, "  Channel : {}", cfg.channel).unwrap();
         writeln!(serial, "  STA SSID: '{}'", cfg.sta_ssid).unwrap();
         writeln!(serial, "  STA Pass: '{}'", cfg.sta_password).unwrap();
+        match cfg.peer_mac {
+            Some(m) => writeln!(
+                serial,
+                "  Peer MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+            .unwrap(),
+            None => writeln!(serial, "  Peer MAC: auto").unwrap(),
+        }
+        let ht40_str = match cfg.ht40_secondary {
+            Some(SecondaryChannel::Above) => "HT40 (secondary above)",
+            Some(SecondaryChannel::Below) => "HT40 (secondary below)",
+            _ => "HT20/legacy",
+        };
+        writeln!(serial, "  TX PHY  : {}", ht40_str).unwrap();
 
         // Collection settings
         writeln!(serial, "\n[Collection]").unwrap();
@@ -960,21 +1044,41 @@ pub fn set_csi_delivery_cmd<'a>(
 ) {
     let mode = argument_finder(item, args, "mode");
     if let Ok(Some(s)) = mode {
+        // `raw` selects the zero-copy fast-path, which is registered by the
+        // collection task at the next `start` (no `CsiDeliveryMode` variant
+        // exists for it). The other modes take effect immediately via
+        // `set_csi_delivery_mode` and also clear the raw flag.
+        let set_raw = |raw: bool| {
+            USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().delivery_raw = raw;
+            });
+        };
         match s {
             "off" => {
+                set_raw(false);
                 set_csi_delivery_mode(CsiDeliveryMode::Off);
                 writeln!(serial, "Delivery mode: Off").unwrap();
             }
             "callback" => {
+                set_raw(false);
                 set_csi_delivery_mode(CsiDeliveryMode::Callback);
                 writeln!(serial, "Delivery mode: Callback").unwrap();
             }
             "async" => {
+                set_raw(false);
                 set_csi_delivery_mode(CsiDeliveryMode::Async);
                 writeln!(serial, "Delivery mode: Async").unwrap();
             }
+            "raw" => {
+                set_raw(true);
+                writeln!(
+                    serial,
+                    "Delivery mode: Raw (zero-copy fast-path; applies on next start, no CSI data delivered)"
+                )
+                .unwrap();
+            }
             _ => {
-                writeln!(serial, "Invalid mode. Use 'off', 'callback', or 'async'.").unwrap();
+                writeln!(serial, "Invalid mode. Use 'off', 'callback', 'async', or 'raw'.").unwrap();
             }
         }
     }
@@ -1089,7 +1193,8 @@ pub fn show_stats<'a>(
     writeln!(serial, "  RX Rate (Hz)     : {}", get_rx_rate_hz()).unwrap();
     writeln!(serial, "  TX Rate (Hz)     : {}", get_tx_rate_hz()).unwrap();
     writeln!(serial, "  RX Dropped Pkts  : {}", get_dropped_packets_rx()).unwrap();
-    writeln!(serial, "  One-way Latency  : {} us", get_one_way_latency()).unwrap();
-    writeln!(serial, "  Two-way Latency  : {} us", get_two_way_latency()).unwrap();
+    writeln!(serial, "  TX Queued Pkts   : {}", get_tx_queued_packets()).unwrap();
+    writeln!(serial, "  TX Confirmed Pkts: {}", get_tx_confirmed_packets()).unwrap();
+    writeln!(serial, "  TX Failed Pkts   : {}", get_tx_failed_packets()).unwrap();
     writeln!(serial, "================================\n").unwrap();
 }

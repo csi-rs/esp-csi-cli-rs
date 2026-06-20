@@ -75,16 +75,37 @@ In order to use this crate, you would need to flash the source code for your tar
     | `println`     | Log via `println!` (default)                                         |
     | `defmt`       | Log via `defmt` (efficient binary logging)                           |
     | `auto`        | Auto-select JTAG or UART backend at runtime (default)                |
-    | `async-print` | Non-blocking async logging — unstable, use with caution              |
-    | `statistics`  | Expose runtime PPS/latency/drop counters via `show-stats` (default)  |
-    | `jtag-serial` | Force JTAG serial backend                                            |
-    | `uart`        | Force UART backend                                                   |
+    | `async-print` | Non-blocking async logging (auto-enabled by `jtag-serial`)           |
+    | `statistics`  | Expose runtime PPS/rate/drop + ESP-NOW TX counters via `show-stats` (default) |
+    | `jtag-serial` | Force JTAG serial backend (auto-enables `async-print`)               |
+    | `uart`        | Force UART backend (do **not** combine with `async-print`)          |
 
     ```bash
-    # Example: ESP32-C6 with defmt, forced JTAG backend
-    cargo build --no-default-features --features "no-std,esp32c6,defmt,jtag-serial" \
+    # Example: ESP32-C6, forced JTAG backend (auto-enables async-print)
+    cargo build --no-default-features --features "no-std,esp32c6,println,jtag-serial,statistics" \
         --target riscv32imac-unknown-none-elf --release
     ```
+
+    > ⚡ **Most optimal setup → `jtag-serial` + `async-print` + the `serialized`
+    > log mode.** Forcing the JTAG backend gives the highest transport bandwidth;
+    > `jtag-serial` automatically pulls in `async-print` (non-blocking logging,
+    > per `esp-csi-rs` 0.7.0), which keeps heavy log I/O off the collection hot
+    > path and prevents dropped CSI packets under load; and the compact binary
+    > `serialized` output (set at runtime with `set-log-mode --mode=serialized`)
+    > minimizes bytes per packet. Build as in the example above, then run
+    > `set-log-mode --mode=serialized` before `start`. Conversely, never pair
+    > `async-print` with `uart`: UART is already blocking, so the async path only
+    > adds overhead.
+    >
+    > ⚠️ **Do not pair `defmt` with `async-print` (for now).** Both register a
+    > defmt `#[global_logger]`, so building them together fails to link
+    > (`_defmt_acquire` multiply defined) — a known upstream `esp-csi-rs` feature
+    > issue. Because `jtag-serial` forces `async-print`, this also means
+    > **`defmt` + `jtag-serial` does not build**. The build script prints a
+    > warning if you enable both. If you specifically want `defmt` (lowest
+    > transfer overhead), build it *without* async-print via the `*-defmt` aliases
+    > (they use `auto`, which selects the JTAG backend at runtime when a USB host
+    > is present).
 
 3.  **Monitor** (if you used a `-build` alias or a manual `cargo build`): Connect your ESP device over USB and run:
     ```bash

@@ -100,7 +100,7 @@ dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "futures-intrusive",
- "heapless 0.9.2",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -550,14 +550,14 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
- "heapless 0.9.2",
+ "heapless 0.9.3",
 ]
 
 [[package]]
 name = "embassy-time"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4fa65b9284d974dad7a23bb72835c4ec85c0b540d86af7fc4098c88cff51d65"
+checksum = "592b0c143ec626e821d4d90da51a2bd91d559d6c442b7c74a47d368c9e23d97a"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -571,9 +571,9 @@ dependencies = [
 
 [[package]]
 name = "embassy-time-driver"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a244c7dc22c8d0289379c8d8830cae06bb93d8f990194d0de5efb3b5ae7ba6"
+checksum = "6ee71af1b3a0deaa53eaf2d39252f83504c853646e472400b763060389b9fcc9"
 dependencies = [
  "document-features",
 ]
@@ -770,7 +770,7 @@ dependencies = [
  "esp-config",
  "esp-metadata-generated",
  "esp-println",
- "heapless 0.9.2",
+ "heapless 0.9.3",
  "riscv",
  "semihosting",
  "xtensa-lx",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-cli-rs"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "embassy-executor",
  "embassy-futures",
@@ -825,15 +825,16 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "heapless 0.7.17",
+ "heapless 0.9.3",
  "menu",
  "static_cell",
 ]
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.6.1"
-source = "git+https://github.com/csi-rs/esp-csi-rs?rev=d17ba572cab518ce5da3f9fcdbacc06a84ab1c11#d17ba572cab518ce5da3f9fcdbacc06a84ab1c11"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f980f2dee93bf4bda9fcd5018f337747c49e2251a730e4b4438789d64fd19740"
 dependencies = [
  "defmt 1.0.1",
  "document-features",
@@ -1023,7 +1024,7 @@ dependencies = [
  "esp32c5",
  "esp32c6",
  "esp32s3",
- "heapless 0.9.2",
+ "heapless 0.9.3",
  "ieee802154",
  "instability",
  "num-derive",
@@ -1440,9 +1441,9 @@ dependencies = [
 
 [[package]]
 name = "heapless"
-version = "0.9.2"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af2455f757db2b292a9b1768c4b70186d443bcb3b316252d6b540aec1cd89ed"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
 dependencies = [
  "defmt 1.0.1",
  "hash32 0.3.1",
@@ -2433,18 +2434,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.40"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a789c6e490b576db9f7e6b6d661bcc9799f7c0ac8352f56ea20193b2681532e5"
+checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.40"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
 dependencies = [
  "proc-macro2",
  "quote",
