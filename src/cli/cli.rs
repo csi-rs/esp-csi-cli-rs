@@ -1,5 +1,6 @@
 use core::fmt::Write;
 use menu::Menu;
+use crate::cli::cmds::device_mac;
 use crate::cli::{SerialInterface, Context};
 
 /// Called by the `menu` crate whenever the CLI runner enters (or re-enters) the root menu.
@@ -16,6 +17,17 @@ pub fn enter_root(
     interface
         .write_str(concat!("ESP-CSI-CLI/", env!("CARGO_PKG_VERSION"), "\n"))
         .unwrap();
+    // Stable per-board identifier (factory eFuse MAC = USB iSerialNumber on
+    // native-USB boards). Emitted on every reset so host tooling can pin the
+    // device by serial number and treat re-enumeration as a non-event. Kept in
+    // sync with the `mac=` field of the `info` command in cmds.rs.
+    let mac = device_mac();
+    writeln!(
+        interface,
+        "mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+    .unwrap();
     interface
         .write_str("******* Welcome to the CSI Collection CLI utility! *******")
         .unwrap();
@@ -35,6 +47,7 @@ pub fn enter_root(
     show-config             Display the current configuration settings.
     show-stats              Print runtime CSI / traffic counters (statistics feature).
     reset-config            Reset all configurations to their default values.
+    restart                 Reboot the device via a clean software reset.
     info                    Print firmware identification metadata.
     help                    Display this help menu or details for a specific command.
 

@@ -615,22 +615,12 @@ async fn csi_collection(
         // Apply IO task configuration (TX/RX direction toggles).
         node.set_io_tasks(user_config.io_tasks);
 
-        // Protocol selection is mode-dependent:
-        // - WifiStation uses 802.11n (or AX on Wi-Fi 6 capable parts) for
-        //   compatibility with standard APs.
-        // - Sniffer/ESP-NOW use the LR physical layer for maximum range
-        //   between ESP devices, paired with the user-selected PHY rate.
-        match user_config.node_mode {
-            NodeMode::WifiStation => {
-                #[cfg(feature = "esp32c6")]
-                node.set_protocol(esp_radio::wifi::Protocol::AX);
-                #[cfg(not(feature = "esp32c6"))]
-                node.set_protocol(esp_radio::wifi::Protocol::N);
-            }
-            NodeMode::WifiSniffer | NodeMode::EspNowCentral | NodeMode::EspNowPeripheral => {
-                node.set_protocol(esp_radio::wifi::Protocol::LR);
-                node.set_rate(user_config.phy_rate);
-            }
+        // Apply the user-selected Wi-Fi PHY protocol (set via `set-protocol`).
+        // ESP-NOW / sniffer modes additionally pin the PHY rate; station mode
+        // derives its rate from the associated AP, so `set_rate` is a no-op there.
+        node.set_protocol(user_config.protocol);
+        if !matches!(user_config.node_mode, NodeMode::WifiStation) {
+            node.set_rate(user_config.phy_rate);
         }
 
         // Watcher that translates a CLI STOP_REQUEST into esp-csi-rs's internal

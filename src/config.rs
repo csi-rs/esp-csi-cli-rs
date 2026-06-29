@@ -4,7 +4,7 @@ use core::sync::atomic::AtomicBool;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, blocking_mutex::Mutex, signal::Signal};
 use esp_csi_rs::{CollectionMode, IOTaskConfig, config::CsiConfig};
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::SecondaryChannel;
+use esp_radio::wifi::{Protocol, SecondaryChannel};
 use heapless::String;
 
 use crate::NodeMode;
@@ -45,6 +45,12 @@ pub struct UserConfig {
     /// Wi-Fi PHY rate. Only meaningful for ESP-NOW modes (sniffer/station
     /// derive their rate from the AP / radio configuration).
     pub phy_rate: WifiPhyRate,
+    /// Wi-Fi PHY protocol applied to the node before a collection run
+    /// (`CSINode::set_protocol`). Set via `set-protocol --protocol=<...>`.
+    /// `LR` (Espressif long-range) is the default and suits sniffer / ESP-NOW
+    /// links between ESP devices; use `N` (or `AX` on Wi-Fi 6 parts) when
+    /// associating to a standard AP in station mode.
+    pub protocol: Protocol,
     /// Per-direction task enables. Disabling RX turns the node into a
     /// pure transmitter (useful for asymmetric topologies); disabling
     /// TX turns it into a pure receiver (useful when the device is the
@@ -87,6 +93,7 @@ impl core::fmt::Debug for UserConfig {
             .field("csi_config", &self.csi_config)
             .field("channel", &self.channel)
             .field("phy_rate", &self.phy_rate)
+            .field("protocol", &self.protocol)
             .field("io_tasks", &self.io_tasks)
             .field("peer_mac", &self.peer_mac)
             .field("ht40_secondary", &ht40_str)
@@ -108,6 +115,7 @@ impl UserConfig {
     /// | `csi_config`      | `CsiConfig::default()` |
     /// | `channel`         | `1`                    |
     /// | `phy_rate`        | `WifiPhyRate::RateMcs0Lgi` |
+    /// | `protocol`        | `Protocol::LR`         |
     /// | `io_tasks`        | TX + RX both enabled   |
     pub fn new() -> Self {
         UserConfig {
@@ -119,6 +127,7 @@ impl UserConfig {
             csi_config: CsiConfig::default(),
             channel: 1,
             phy_rate: WifiPhyRate::RateMcs0Lgi,
+            protocol: Protocol::LR,
             io_tasks: IOTaskConfig::default(),
             peer_mac: None,
             ht40_secondary: None,
