@@ -100,7 +100,7 @@ dependencies = [
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "futures-intrusive",
- "heapless 0.8.0",
+ "heapless 0.9.3",
 ]
 
 [[package]]
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-cli-rs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "embassy-executor",
  "embassy-futures",
@@ -832,9 +832,9 @@ dependencies = [
 
 [[package]]
 name = "esp-csi-rs"
-version = "0.7.0"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f980f2dee93bf4bda9fcd5018f337747c49e2251a730e4b4438789d64fd19740"
+checksum = "785b9f8afbda407af53e99828393f31a16cefdcd35d2bfc7a4c1f62e4d340037"
 dependencies = [
  "defmt 1.0.1",
  "document-features",

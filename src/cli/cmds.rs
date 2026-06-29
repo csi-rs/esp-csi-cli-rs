@@ -14,7 +14,7 @@ use esp_csi_rs::central::esp_now::{
     get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
 };
 use esp_radio::esp_now::WifiPhyRate;
-use esp_radio::wifi::SecondaryChannel;
+use esp_radio::wifi::{Protocol, SecondaryChannel};
 
 use menu::{Item, Menu, argument_finder};
 
@@ -23,7 +23,26 @@ use crate::{NodeMode, cli::{Context, SerialInterface}, config::{IS_COLLECTING, S
 /// Wire-format version of the firmware identification block emitted by
 /// [`cli_info`] and the welcome banner. Bump on any breaking change to the
 /// `info` grammar so host-side tooling can refuse incompatible firmware.
-pub const CLI_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2: added the `mac=` line to `info` (and the welcome banner). Host tooling
+/// pins per-device tasks to this stable serial number rather than the
+/// `/dev/ttyACM*` path, so a `restart` and the USB re-enumeration it triggers
+/// re-bind to the same physical board whatever device node it returns as.
+pub const CLI_PROTOCOL_VERSION: u32 = 2;
+
+/// Read the factory base MAC address from eFuse.
+///
+/// This is the stable per-board identifier that the USB-Serial-JTAG stack also
+/// surfaces as the USB `iSerialNumber` descriptor on native-USB boards (e.g.
+/// `D0:CF:13:E2:90:E8`). Host tooling keys device identity off this value
+/// instead of the enumeration-order `/dev/ttyACM*` path, which makes a
+/// `restart` (and the re-enumeration it causes) a non-event: the per-device
+/// task re-binds to the same board no matter which node number it comes back as.
+pub fn device_mac() -> [u8; 6] {
+    let mut out = [0u8; 6];
+    out.copy_from_slice(esp_hal::efuse::base_mac_address().as_bytes());
+    out
+}
 
 /// Parse a MAC address of the form `aa:bb:cc:dd:ee:ff` (also accepting `-`
 /// separators), case-insensitive. Returns `None` on any malformed input.
@@ -853,6 +872,7 @@ pub fn show_config<'a>(
         writeln!(serial, "  Mode          : {}", mode_str).unwrap();
         writeln!(serial, "  Traffic Freq  : {}Hz", cfg.trigger_freq).unwrap();
         writeln!(serial, "  PHY Rate      : {:?}", cfg.phy_rate).unwrap();
+        writeln!(serial, "  Protocol      : {:?}", cfg.protocol).unwrap();
         writeln!(
             serial,
             "  IO Tasks      : tx={}, rx={}",
@@ -968,6 +988,56 @@ pub fn set_phy_rate<'a>(
             writeln!(
                 serial,
                 "Invalid rate. Try mcs0-lgi (default), mcs7-lgi, 6m, 24m, 54m, etc."
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// CLI command: `set-protocol`
+///
+/// Sets the Wi-Fi PHY protocol stored in [`USER_CONFIG`] and applied to the
+/// node via `CSINode::set_protocol` at the start of each collection run.
+///
+/// # Options
+/// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`, `ax`.
+///
+/// `lr` (Espressif long-range) is the default and suits sniffer / ESP-NOW links
+/// between ESP devices; use `n` (or `ax` on Wi-Fi 6 parts) when associating to a
+/// standard AP in station mode.
+pub fn set_protocol_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let protocol = argument_finder(item, args, "protocol");
+    let parsed = match protocol {
+        Ok(Some(s)) => match s {
+            "b" => Some(Protocol::B),
+            "g" => Some(Protocol::G),
+            "n" => Some(Protocol::N),
+            "lr" => Some(Protocol::LR),
+            "a" => Some(Protocol::A),
+            "ac" => Some(Protocol::AC),
+            "ax" => Some(Protocol::AX),
+            _ => None,
+        },
+        _ => {
+            writeln!(serial, "Usage: set-protocol --protocol=<b|g|n|lr|a|ac|ax>").unwrap();
+            return;
+        }
+    };
+    match parsed {
+        Some(p) => {
+            USER_CONFIG.lock(|c| c.borrow_mut().as_mut().unwrap().protocol = p);
+            writeln!(serial, "\nProtocol: {:?}", p).unwrap();
+        }
+        None => {
+            writeln!(
+                serial,
+                "Invalid protocol. Use one of: b, g, n, lr (default), a, ac, ax."
             )
             .unwrap();
         }
@@ -1115,9 +1185,14 @@ pub fn set_csi_delivery_cmd<'a>(
 /// version=<version>
 /// chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
 /// protocol=<u32>
+/// mac=<AA:BB:CC:DD:EE:FF>
 /// features=<comma-separated-list>
 /// END-INFO
 /// ```
+///
+/// The `mac` field (protocol >= 2) is the factory eFuse MAC, which is also the
+/// USB `iSerialNumber` on native-USB boards. Host tooling uses it as the stable
+/// device key so a `restart`/re-enumeration re-binds to the same board.
 pub fn cli_info<'a>(
     _menu: &Menu<SerialInterface, Context>,
     _item: &Item<SerialInterface, Context>,
@@ -1161,13 +1236,49 @@ pub fn cli_info<'a>(
     push_feat!("jtag-serial");
     push_feat!("uart");
 
+    let mac = device_mac();
+
     writeln!(serial, "ESP-CSI-CLI/{}", version).unwrap();
     writeln!(serial, "name={}", name).unwrap();
     writeln!(serial, "version={}", version).unwrap();
     writeln!(serial, "chip={}", chip).unwrap();
     writeln!(serial, "protocol={}", CLI_PROTOCOL_VERSION).unwrap();
+    writeln!(
+        serial,
+        "mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+    .unwrap();
     writeln!(serial, "features={}", features).unwrap();
     writeln!(serial, "END-INFO").unwrap();
+}
+
+/// CLI command: `restart`
+///
+/// Performs a clean software reset of the chip via
+/// [`esp_hal::system::software_reset`]. This is the device half of the
+/// native-USB reset story: on boards whose serial transport is the built-in
+/// USB-Serial-JTAG peripheral, resetting drops and re-enumerates the USB
+/// device. Because host tooling pins to the board's MAC (see [`device_mac`] /
+/// the `mac=` field of `info`) rather than the `/dev/ttyACM*` path, the
+/// re-enumeration is a non-event — the per-device task re-binds to the same
+/// physical board on the new node number.
+///
+/// The function diverges (`software_reset` returns `!`); the firmware reboots
+/// and re-emits the welcome banner — including the magic identification line
+/// and `mac=` — which the host greps to confirm the board is back.
+pub fn restart_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    _item: &Item<SerialInterface, Context>,
+    _args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    writeln!(serial, "\nRestarting...").unwrap();
+    // Push the message out of the peripheral FIFO before the reset tears the
+    // transport down, otherwise it can be lost on the way out.
+    let _ = Write::flush(serial);
+    esp_hal::system::software_reset();
 }
 
 /// CLI command: `show-stats` (compiled in only with the `statistics` feature)

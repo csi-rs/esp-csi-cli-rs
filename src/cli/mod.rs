@@ -6,8 +6,9 @@ use cli::{enter_root};
 use menu::{Item, ItemType, Menu, Parameter};
 
 use crate::cli::cmds::{
-    cli_info, reset_config, set_collection_mode, set_csi, set_csi_delivery_cmd, set_io_tasks_cmd,
-    set_log_mode, set_phy_rate, set_traffic, set_wifi, show_config, start_csi_collect,
+    cli_info, reset_config, restart_cmd, set_collection_mode, set_csi, set_csi_delivery_cmd,
+    set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic, set_wifi,
+    show_config, start_csi_collect,
 };
 #[cfg(feature = "statistics")]
 use crate::cli::cmds::show_stats;
@@ -415,6 +416,31 @@ Output format:
         },
         &Item {
             item_type: ItemType::Callback {
+                function: restart_cmd,
+                parameters: &[],
+            },
+            command: "restart",
+            help: Some("restart - Reboot the device via a clean software reset.
+
+Usage:
+  restart
+
+Description:
+  Performs a software reset of the chip. On native-USB boards (the built-in
+  USB-Serial-JTAG transport) this drops and re-enumerates the USB device, so
+  the serial port may come back as a different /dev/ttyACM* node.
+
+  This is intended to be paired with host tooling that pins each device by its
+  stable USB serial number (the factory MAC, reported as the `mac=` field of
+  `info` and on the welcome banner) instead of the port path. With that pinning
+  in place the re-enumeration is a non-event: the per-device task re-binds to
+  the same physical board regardless of the node number it returns as.
+
+  On reboot the firmware re-emits the welcome banner (magic line + `mac=`),
+  which a host can grep to confirm the board is back."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
                 function: reset_config,
                 parameters: &[],
             },
@@ -462,6 +488,41 @@ Description:
   Selects the Wi-Fi PHY rate used by ESP-NOW central / peripheral nodes.
   Sniffer and station modes derive their rate from the surrounding radio
   configuration and ignore this setting."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_protocol_cmd,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "protocol",
+                        argument_name: "protocol",
+                        help: Some("Wi-Fi PHY protocol: b|g|n|lr|a|ac|ax"),
+                    },
+                ],
+            },
+            command: "set-protocol",
+            help: Some("set-protocol - Set the Wi-Fi PHY protocol.
+
+Usage:
+  set-protocol --protocol=<b|g|n|lr|a|ac|ax>
+
+Options:
+  --protocol=<NAME>   One of: b, g, n, lr (default), a, ac, ax.
+
+Examples:
+  set-protocol --protocol=lr     # ESP-to-ESP long range (sniffer / ESP-NOW)
+  set-protocol --protocol=n      # 802.11n, e.g. station mode against an AP
+  set-protocol --protocol=ax     # 802.11ax (Wi-Fi 6 capable parts)
+
+Description:
+  Applied to the node via CSINode::set_protocol at the start of each
+  collection run. Previously this was hardcoded per WiFi mode (LR for
+  sniffer/ESP-NOW, N/AX for station); it is now an explicit setting.
+
+  Pick the protocol to match your link: LR for maximum range between ESP
+  devices, N/AX when associating to a standard AP in station mode. Not every
+  part supports every protocol — unsupported values may be rejected by the
+  radio at start."),
         },
         &Item {
             item_type: ItemType::Callback {
