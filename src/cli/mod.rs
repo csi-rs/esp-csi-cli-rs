@@ -1,17 +1,17 @@
 mod cli;
-mod serial;
 mod cmds;
+mod serial;
 
-use cli::{enter_root};
+use cli::enter_root;
 use menu::{Item, ItemType, Menu, Parameter};
 
+#[cfg(feature = "statistics")]
+use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
     cli_info, reset_config, restart_cmd, set_collection_mode, set_csi, set_csi_delivery_cmd,
     set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic, set_wifi,
     show_config, start_csi_collect,
 };
-#[cfg(feature = "statistics")]
-use crate::cli::cmds::show_stats;
 pub use crate::cli::serial::SerialInterface;
 // `is_jtag` is only compiled under `auto` (see serial.rs); match that gating
 // here so forced `jtag-serial`/`uart` builds don't try to re-export a fn that
@@ -54,6 +54,11 @@ pub const ROOT_MENU: Menu<SerialInterface, Context> = Menu {
                         argument_name: "frequency-hz",
                         help: Some("Traffic Generation Frequency"),
                     },
+                    Parameter::NamedValue {
+                        parameter_name: "unsolicited",
+                        argument_name: "unsolicited",
+                        help: Some("Flood unsolicited echo replies instead of requests (on|off)"),
+                    },
                 ],
             },
             command: "set-traffic",
@@ -64,15 +69,28 @@ Usage:
   set-traffic [OPTIONS]
 
 Options:
-  --frequency-hz=<NUMBER>      Specify the traffic frequencey in Hz (default: 100).
+  --frequency-hz=<NUMBER>      Specify the traffic frequency in Hz (default: 100).
+  --unsolicited=<on|off>       Flood unsolicited ICMP echo REPLIES instead of
+                               echo requests (default: off). The peer ignores
+                               unsolicited replies, so traffic is strictly
+                               one-directional: no reply contention, stable
+                               offered rate — but this node gets no CSI back.
+                               Use on a flooding AP whose paired station is
+                               the collector; keep off when this node needs
+                               CSI from the peer's replies (e.g. station
+                               flooding a router).
 
 Examples:
   set-traffic --frequency-hz=10
+  set-traffic --frequency-hz=1000 --unsolicited=on
 
 Description:
   This command allows you to configure traffic parameters for the CSI collection process.
-  You can enable traffic generation and specify the interval 
-  between generated packets. Setting a value of zero disbles traffic generation.",
+  You can enable traffic generation and specify the interval
+  between generated packets. Setting a value of zero disables traffic
+  generation (WiFi AP/station modes: the ICMP flood TX task is not started;
+  a receive-only collector should set this to 0 so it does not contend for
+  airtime with the AP's downlink flood).",
             ),
         },
         &Item {
@@ -134,21 +152,25 @@ Examples:
             item_type: ItemType::Callback {
                 function: set_csi,
                 parameters: &[
-                    Parameter::Named {
-                        parameter_name: "disable-lltf",
-                        help: Some("Disable LLTF"),
+                    Parameter::NamedValue {
+                        parameter_name: "lltf",
+                        argument_name: "onoff",
+                        help: Some("LLTF CSI: on|off"),
                     },
-                    Parameter::Named {
-                        parameter_name: "disable-htltf",
-                        help: Some("Disable HTLTF"),
+                    Parameter::NamedValue {
+                        parameter_name: "htltf",
+                        argument_name: "onoff",
+                        help: Some("HTLTF CSI: on|off"),
                     },
-                    Parameter::Named {
-                        parameter_name: "disable-stbc-htltf",
-                        help: Some("Disable STBC HTLTF"),
+                    Parameter::NamedValue {
+                        parameter_name: "stbc-htltf",
+                        argument_name: "onoff",
+                        help: Some("STBC HTLTF CSI: on|off"),
                     },
-                    Parameter::Named {
-                        parameter_name: "disable-ltf-merge",
-                        help: Some("Disable LTF Merge"),
+                    Parameter::NamedValue {
+                        parameter_name: "ltf-merge",
+                        argument_name: "onoff",
+                        help: Some("LTF Merge: on|off"),
                     },
                 ],
             },
@@ -158,20 +180,24 @@ Examples:
 Usage:
     set-csi [OPTIONS]
 
+    Each flag is an on|off toggle, so a feature can be re-enabled after being
+    turned off (no reset-config needed). Accepted values: on|off, true|false,
+    1|0, enable|disable, yes|no.
+
     Options:
-    --disable-lltf               Disable LLTF CSI configuration (default: enabled).
-    --disable-htltf              Disable HTLTF CSI configuration (default: enabled).
-    --disable-stbc-htltf         Disable STBC HTLTF CSI configuration (default: enabled).
-    --disable-ltf-merge          Disable LTF Merge CSI configuration (default: enabled).
+    --lltf=<on|off>              LLTF CSI configuration (default: on).
+    --htltf=<on|off>             HTLTF CSI configuration (default: on).
+    --stbc-htltf=<on|off>        STBC HTLTF CSI configuration (default: on).
+    --ltf-merge=<on|off>         LTF Merge CSI configuration (default: on).
 
 Examples:
-    set-csi --disable-lltf --disable-ltf-merge
-    set-csi --disable-htltf
+    set-csi --lltf=off --ltf-merge=off
+    set-csi --htltf=on
 
 Description:
-This command allows you to enable or disable specific Channel State Information (CSI) features. 
-By default, all CSI features are enabled. Use the options to selectively disable specific
-configurations if necessary.
+This command allows you to enable or disable specific Channel State Information (CSI) features.
+By default, all CSI features are enabled. Use the options to toggle specific
+configurations on or off.
 
 Note:
 CSI Configuration is ignored when running in Access Point Mode."),
@@ -181,47 +207,52 @@ CSI Configuration is ignored when running in Access Point Mode."),
             item_type: ItemType::Callback {
                 function: set_csi,
                 parameters: &[
-                    Parameter::Named {
-                        parameter_name: "disable-csi",
-                        help: Some("Disable acquisition of CSI"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-legacy",
-                        help: Some("Disable acquisition of L-LTF when receiving a 11g PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-ht20",
-                        help: Some("Disable acquisition of HT-LTF when receiving an HT20 PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-ht40",
-                        help: Some("Disable acquisition of HT-LTF when receiving an HT40 PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-su",
-                        help: Some("Disable acquisition of HE-LTF when receiving an HE20 SU PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-mu",
-                        help: Some("Disable acquisition of HE-LTF when receiving an HE20 MU PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-dcm",
-                        help: Some("Disable acquisition of HE-LTF when receiving an HE20 DCM applied PPDU"),
-                    },
-                    Parameter::Named {
-                        parameter_name: "disable-csi-beamformed",
-                        help: Some("Disable acquisition of HE-LTF when receiving an HE20 Beamformed applied PPDU"),
+                    Parameter::NamedValue {
+                        parameter_name: "csi",
+                        argument_name: "onoff",
+                        help: Some("Acquisition of CSI: on|off"),
                     },
                     Parameter::NamedValue {
-                        parameter_name: "csi-he-stbc",
-                        argument_name: "csihestbc",
-                        help: Some("When receiving an STBC applied HE PPDU 0-3 value"),
+                        parameter_name: "csi-legacy",
+                        argument_name: "onoff",
+                        help: Some("L-LTF on 11g PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-ht20",
+                        argument_name: "onoff",
+                        help: Some("HT-LTF on HT20 PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-ht40",
+                        argument_name: "onoff",
+                        help: Some("HT-LTF on HT40 PPDU: on|off"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "val-scale-cfg",
                         argument_name: "valscalecfg",
                         help: Some("Value 0-3"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "preset",
+                        argument_name: "preset",
+                        help: Some("CSI preset: default"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "dump-ack",
+                        argument_name: "onoff",
+                        help: Some("Dump 802.11 ACK frames: on|off"),
+                    },
+                    #[cfg(feature = "esp32c5")]
+                    Parameter::NamedValue {
+                        parameter_name: "csi-force-lltf",
+                        argument_name: "onoff",
+                        help: Some("Force L-LTF acquisition (C5 only): on|off"),
+                    },
+                    #[cfg(feature = "esp32c5")]
+                    Parameter::NamedValue {
+                        parameter_name: "csi-vht",
+                        argument_name: "onoff",
+                        help: Some("VHT-LTF on VHT20 PPDU (C5 only): on|off"),
                     },
                 ],
             },
@@ -231,30 +262,30 @@ CSI Configuration is ignored when running in Access Point Mode."),
 Usage:
     set-csi [OPTIONS]
 
+    Each acquisition flag is an on|off toggle, so a feature can be re-enabled
+    after being turned off (no reset-config needed). Accepted values: on|off,
+    true|false, 1|0, enable|disable, yes|no.
+
     Options:
-    --disable-csi               Disable acquisition of CSI (default: enabled)
-    --disable-csi-legacy        Disable acquisition of L-LTF when receiving a 11g PPDU (default: enabled)
-    --disable-csi-ht20          Disable acquisition of HT-LTF when receiving an HT20 PPDU (default: enabled)
-    --disable-csi-ht40          Disable acquisition of HT-LTF when receiving an HT40 PPDU (default: enabled)
-    --disable-csi-su            Disable acquisition of HE-LTF when receiving an HE20 SU PPDU (default: enabled)
-    --disable-csi-mu            Disable acquisition of HE-LTF when receiving an HE20 MU PPDU (default: enabled)
-    --disable-csi-dcm           Disable acquisition of HE-LTF when receiving an HE20 DCM applied PPDU (default: enabled)
-    --disable-csi-beamformed    Disable acquisition of HE-LTF when receiving an HE20 Beamformed applied PPDU (default: enabled)
-    --csi-he-stbc               When receiving an STBC applied HE PPDU,
-                                    0- acquire the complete HE-LTF1
-                                    1- acquire the complete HE-LTF2
-                                    2- sample evenly among the HE-LTF1 and HE-LTF2
-                                    (default: 2)
+    --csi=<on|off>              Acquisition of CSI, master switch (default: on)
+    --csi-legacy=<on|off>       L-LTF when receiving a 11g PPDU (default: on)
+    --csi-ht20=<on|off>         HT-LTF when receiving an HT20 PPDU (default: on)
+    --csi-ht40=<on|off>         HT-LTF when receiving an HT40 PPDU (default: on)
     --val-scale-cfg             Value 0-3 (default: 2)
+    --preset=<default>          Apply a CSI acquisition preset
+    --dump-ack=<on|off>         Dump 802.11 ACK frames (default: on)
+    --csi-force-lltf=<on|off>   Force L-LTF acquisition (ESP32-C5 only)
+    --csi-vht=<on|off>          VHT-LTF on VHT20 PPDUs (ESP32-C5 only)
 
 Examples:
-    set-csi --disable-csi-legacy --csi-he-stbc=1
-    set-csi --disable-csi
+    set-csi --csi-legacy=off --preset=default
+    set-csi --csi-ht40=on --csi-ht20=off
+    set-csi --csi=off
 
 Description:
-This command allows you to enable or disable specific Channel State Information (CSI) features. 
-By default, all CSI features are enabled. Use the options to selectively disable specific
-configurations if necessary."),
+This command allows you to enable or disable specific Channel State Information (CSI) features.
+By default, all CSI features are enabled. Use the options to toggle specific
+configurations on or off."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -274,6 +305,31 @@ configurations if necessary."),
                         parameter_name: "sta-password",
                         argument_name: "stapassword",
                         help: Some("The password for the station"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-ssid",
+                        argument_name: "apssid",
+                        help: Some("The SSID for the softAP (wifi-ap mode)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-password",
+                        argument_name: "appassword",
+                        help: Some("The password for the softAP (empty = open)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-dhcp",
+                        argument_name: "apdhcp",
+                        help: Some("Enable/disable built-in DHCP in wifi-ap mode (on|off)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-leases",
+                        argument_name: "apleases",
+                        help: Some("DHCP lease pool size in wifi-ap mode (1-8)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "ap-burst",
+                        argument_name: "apburst",
+                        help: Some("Synchronized burst flood in wifi-ap mode (on|off)"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "set-channel",
@@ -303,10 +359,21 @@ quotes, e.g. --sta-ssid='My WiFi' --sta-password=\"my pass\". Both quote styles
 are accepted. Underscores are passed through as literal `_`.
 
 Options:
-  --mode=<station|sniffer|esp-now-central|esp-now-peripheral>   Specify WiFi operation mode (default: sniffer).
+  --mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>
+                                                                Specify WiFi operation mode (default: sniffer).
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
-  --set-channel=<NUMBER>                                        Set the channel (default: 1).
+  --ap-ssid=<SSID>                                              Set the SSID for wifi-ap mode (default: esp-csi-ap).
+  --ap-password=<PASSWORD>                                      Set the softAP password (default: empty = open).
+  --ap-dhcp=<on|off>                                            Enable/disable built-in DHCP in wifi-ap mode (default: on).
+  --ap-leases=<1-8>                                             DHCP lease pool size in wifi-ap mode (default: 4). With
+                                                                more than one lease the ICMP flood round-robins across
+                                                                all associated stations; 1 = legacy single-target flood.
+  --ap-burst=<on|off>                                           Synchronized burst flood in wifi-ap mode (default: off).
+                                                                Every tick sends one frame back-to-back to every station
+                                                                for time-aligned multi-receiver CSI; total airtime =
+                                                                frequency-hz x leases (off = round-robin, rate shared).
+  --set-channel=<NUMBER>                                        Set the channel (default: 149 on C5, 1 elsewhere).
   --peer-mac=<aa:bb:cc:dd:ee:ff>                                ESP-NOW: explicit peer MAC. Switches off automatic
                                                                 magic-prefix pairing for per-node source-MAC filtering.
                                                                 Pass an empty value to clear (back to auto pairing).
@@ -316,16 +383,22 @@ Options:
 Examples:
   set-wifi --mode=sniffer
   set-wifi --mode=station --sta-ssid='My WiFi' --sta-password='my pass'
+  set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap
   set-wifi --mode=esp-now-central --peer-mac=aa:bb:cc:dd:ee:ff --ht40=above
+  set-wifi --mode=esp-now-fast-collector --set-channel=6
+  set-wifi --mode=esp-now-fast-source --set-channel=6
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
   - Modes:
       - `station`: Connect to an existing WiFi network.
       - `sniffer`: Monitor WiFi traffic passively.
+      - `wifi-ap`: Self-contained softAP CSI collector (pair with `station` on same SSID).
       - `esp-now-central`: Act as a central device in ESP-NOW communication.
       - `esp-now-peripheral`: Act as a peripheral device in ESP-NOW communication.
-  - ESP-NOW options (`--peer-mac`, `--ht40`) only take effect in ESP-NOW modes."),
+      - `esp-now-fast-collector` / `esp-now-fast-source`: Asymmetric ESP-NOW simplex for max CSI pps.
+  - ESP-NOW options (`--peer-mac`, `--ht40`) apply to all ESP-NOW modes including fast simplex.
+  - For AP + STA lab pairs, use `set-protocol --protocol=n` and consider `set-traffic --frequency-hz=4000`."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -376,7 +449,7 @@ Usage:
 
 Description:
   Prints a summary of every persisted setting:
-  - WiFi: mode, channel, station SSID/password.
+  - WiFi: mode, channel, station SSID/password, softAP SSID/password/DHCP.
   - Collection: collector/listener role, traffic frequency, PHY rate, TX/RX
     task toggles.
   - CSI Config: chip-specific feature flags (LLTF/HTLTF on classic chips,
@@ -496,7 +569,7 @@ Description:
                     Parameter::NamedValue {
                         parameter_name: "protocol",
                         argument_name: "protocol",
-                        help: Some("Wi-Fi PHY protocol: b|g|n|lr|a|ac|ax"),
+                        help: Some("Wi-Fi PHY protocol: b|g|n|lr|a|ac"),
                     },
                 ],
             },
@@ -504,23 +577,22 @@ Description:
             help: Some("set-protocol - Set the Wi-Fi PHY protocol.
 
 Usage:
-  set-protocol --protocol=<b|g|n|lr|a|ac|ax>
+  set-protocol --protocol=<b|g|n|lr|a|ac>
 
 Options:
-  --protocol=<NAME>   One of: b, g, n, lr (default), a, ac, ax.
+  --protocol=<NAME>   One of: b, g, n, lr (default), a, ac.
 
 Examples:
   set-protocol --protocol=lr     # ESP-to-ESP long range (sniffer / ESP-NOW)
   set-protocol --protocol=n      # 802.11n, e.g. station mode against an AP
-  set-protocol --protocol=ax     # 802.11ax (Wi-Fi 6 capable parts)
 
 Description:
   Applied to the node via CSINode::set_protocol at the start of each
   collection run. Previously this was hardcoded per WiFi mode (LR for
-  sniffer/ESP-NOW, N/AX for station); it is now an explicit setting.
+  sniffer/ESP-NOW, N for station); it is now an explicit setting.
 
   Pick the protocol to match your link: LR for maximum range between ESP
-  devices, N/AX when associating to a standard AP in station mode. Not every
+  devices, N when associating to a standard AP in station mode. Not every
   part supports every protocol — unsupported values may be rejected by the
   radio at start."),
         },

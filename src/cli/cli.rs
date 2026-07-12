@@ -1,7 +1,7 @@
+use crate::cli::cmds::device_mac;
+use crate::cli::{Context, SerialInterface};
 use core::fmt::Write;
 use menu::Menu;
-use crate::cli::cmds::device_mac;
-use crate::cli::{SerialInterface, Context};
 
 /// Called by the `menu` crate whenever the CLI runner enters (or re-enters) the root menu.
 ///

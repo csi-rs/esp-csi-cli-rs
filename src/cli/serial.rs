@@ -1,5 +1,6 @@
 // `Uart` is only referenced by the ESP32 type alias, the forced-`uart` alias,
 // and the runtime `auto` enum — not by a forced `jtag-serial` build.
+use esp_hal::Async;
 #[cfg(any(feature = "esp32", feature = "uart", feature = "auto"))]
 use esp_hal::uart::Uart;
 #[cfg(any(
@@ -9,7 +10,6 @@ use esp_hal::uart::Uart;
     feature = "esp32s3"
 ))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use esp_hal::Async;
 
 /// Serial interface type used by the CLI runner on ESP32 targets.
 ///
@@ -119,8 +119,12 @@ impl<'d> embedded_io_async::Read for SerialInterface<'d> {
         use embedded_io_07::Error;
 
         match self {
-            Self::UsbJtag(j) => embedded_io_async::Read::read(j, buf).await.map_err(|e| e.kind()),
-            Self::Uart(u) => embedded_io_async::Read::read(u, buf).await.map_err(|e| e.kind()),
+            Self::UsbJtag(j) => embedded_io_async::Read::read(j, buf)
+                .await
+                .map_err(|e| e.kind()),
+            Self::Uart(u) => embedded_io_async::Read::read(u, buf)
+                .await
+                .map_err(|e| e.kind()),
         }
     }
 }
@@ -156,14 +160,25 @@ impl<'d> embedded_io::Write for SerialInterface<'d> {
 
 /// Detects at runtime whether a USB host is connected to the USB-Serial-JTAG peripheral.
 ///
-/// Reads the `SOF_INT` bit from the device's `USB_DEVICE_INT_RAW` register.
-/// A set bit means the USB host has sent a Start-Of-Frame packet, indicating
-/// an active connection. This is used by the `auto` feature to choose between
-/// the JTAG and UART backends without requiring a compile-time decision.
+/// Reads the `SOF_INT` bit from the device's `USB_DEVICE_INT_RAW` register. A USB host
+/// sends a Start-Of-Frame packet every 1 ms once the device is enumerated, and `SOF_INT`
+/// is a *latched* raw bit (stays set until cleared), so its presence is a reliable
+/// "a USB host is talking to us" signal. Used by the `auto` feature to choose the JTAG vs
+/// UART backend without a compile-time decision.
+///
+/// Two robustness measures matter here (both were previously missing and caused esp32s3
+/// boards to wrongly fall back to UART — silent on `/dev/ttyACM*`):
+///   1. The register **address** must be `USB_DEVICE` base + `INT_RAW` offset (0x008). The
+///      esp32s3 constant previously pointed at base+0x000, i.e. the `EP1` RX-FIFO data
+///      register — reading it tests unrelated FIFO bits (and pops a FIFO byte).
+///   2. A single instantaneous read **races** the boot/USB-enumeration window: right after a
+///      reset the host may not have resumed SOF yet, so one read sees 0 and picks UART. We
+///      poll for a short window and return as soon as a SOF is latched; a board with no USB
+///      host polls out and uses UART.
 ///
 /// # Safety
-/// Performs a raw memory-mapped register read. The address constants are
-/// chip-specific and are selected via Cargo features at compile time.
+/// Performs a raw memory-mapped register read. The address constants are chip-specific and
+/// are selected via Cargo features at compile time.
 ///
 /// Not available on ESP32 which has no USB-Serial-JTAG peripheral.
 #[cfg(all(
@@ -177,7 +192,7 @@ impl<'d> embedded_io::Write for SerialInterface<'d> {
 ))]
 pub fn is_jtag() -> bool {
     // USB_DEVICE base + INT_RAW offset (0x008) per chip TRM. Verified against
-    // the esp32c{3,5,6}/esp32s3 PACs.
+    // the esp32c{3,5,6}/esp32s3 PACs (usb_device: ep1 @0x00, ep1_conf @0x04, int_raw @0x08).
     #[cfg(feature = "esp32c3")]
     const USB_DEVICE_INT_RAW: *const u32 = 0x60043008 as *const u32;
     #[cfg(feature = "esp32c5")]
@@ -185,8 +200,24 @@ pub fn is_jtag() -> bool {
     #[cfg(feature = "esp32c6")]
     const USB_DEVICE_INT_RAW: *const u32 = 0x6000f008 as *const u32;
     #[cfg(feature = "esp32s3")]
-    const USB_DEVICE_INT_RAW: *const u32 = 0x60038000 as *const u32;
+    const USB_DEVICE_INT_RAW: *const u32 = 0x60038008 as *const u32;
 
     const SOF_INT_MASK: u32 = 0b10;
-    unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 }
+    // Poll for a SOF over a short window so a connected host (which may still be
+    // (re)enumerating right after reset) is reliably detected. SOFs arrive every 1 ms,
+    // so this returns almost immediately when a host is present; only a genuinely
+    // host-less board waits out the full budget before choosing UART.
+    const POLL_BUDGET_MS: u32 = 300;
+    let delay = esp_hal::delay::Delay::new();
+    let mut waited = 0u32;
+    loop {
+        if unsafe { (USB_DEVICE_INT_RAW.read_volatile() & SOF_INT_MASK) != 0 } {
+            return true;
+        }
+        if waited >= POLL_BUDGET_MS {
+            return false;
+        }
+        delay.delay_millis(1);
+        waited += 1;
+    }
 }

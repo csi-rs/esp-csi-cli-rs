@@ -1,24 +1,28 @@
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 use embedded_io::Write;
-use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
+#[cfg(feature = "statistics")]
+use esp_csi_rs::central::esp_now::{
+    get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
+};
 use esp_csi_rs::logging::logging::LogMode;
-use esp_csi_rs::{set_csi_delivery_mode, set_csi_logging_enabled, CsiDeliveryMode};
+use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
+use esp_csi_rs::{CsiDeliveryMode, set_csi_delivery_mode, set_csi_logging_enabled};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
     get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_total_rx_packets,
     get_total_tx_packets, get_tx_rate_hz,
-};
-#[cfg(feature = "statistics")]
-use esp_csi_rs::central::esp_now::{
-    get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
 };
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{Protocol, SecondaryChannel};
 
 use menu::{Item, Menu, argument_finder};
 
-use crate::{NodeMode, cli::{Context, SerialInterface}, config::{IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig}};
+use crate::{
+    NodeMode,
+    cli::{Context, SerialInterface},
+    config::{IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig},
+};
 
 /// Wire-format version of the firmware identification block emitted by
 /// [`cli_info`] and the welcome banner. Bump on any breaking change to the
@@ -90,33 +94,62 @@ pub fn set_traffic<'a>(
         Err(_) => (),
     }
 
+    if let Ok(Some(s)) = argument_finder(item, args, "unsolicited") {
+        match parse_on_off(s) {
+            Some(v) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().flood_unsolicited = v
+            }),
+            None => writeln!(serial, "Invalid --unsolicited value (use on|off).").unwrap(),
+        }
+    }
+
     writeln!(serial, "\nUpdated Traffic Configuration:\n").unwrap();
     USER_CONFIG.lock(|config| {
+        let config = config.borrow();
+        let config = config.as_ref().unwrap();
         writeln!(
             serial,
-            "Traffic Frequency: {}Hz",
-            config.borrow().as_ref().unwrap().trigger_freq
+            "Traffic Frequency: {}Hz\nICMP Flood Kind: {}",
+            config.trigger_freq,
+            if config.flood_unsolicited {
+                "unsolicited echo replies (one-directional)"
+            } else {
+                "echo requests (peer replies)"
+            },
         )
         .unwrap();
     });
+}
+
+/// Parse an on/off-style flag value used by the `set-csi` toggles.
+///
+/// Accepts `on|off`, `true|false`, `1|0`, `enable[d]|disable[d]`, `yes|no`.
+/// Returns `None` for anything else so the caller can report the bad value.
+fn parse_on_off(s: &str) -> Option<bool> {
+    match s {
+        "on" | "true" | "1" | "enable" | "enabled" | "yes" => Some(true),
+        "off" | "false" | "0" | "disable" | "disabled" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 /// CLI command: `set-csi` (ESP32-C6 variant)
 ///
 /// Configures ESP32-C6-specific HE/STBC CSI acquisition flags in [`USER_CONFIG`].
+/// Each acquisition flag is an explicit `on|off` toggle, so features can be
+/// re-enabled after being turned off without a `reset-config`.
 ///
 /// # Options
-/// - `--disable-csi`             — Disable CSI acquisition entirely.
-/// - `--disable-csi-legacy`      — Disable L-LTF for 11g PPDUs.
-/// - `--disable-csi-ht20`        — Disable HT-LTF for HT20 PPDUs.
-/// - `--disable-csi-ht40`        — Disable HT-LTF for HT40 PPDUs.
-/// - `--disable-csi-su`          — Disable HE-LTF for HE20 SU PPDUs.
-/// - `--disable-csi-mu`          — Disable HE-LTF for HE20 MU PPDUs.
-/// - `--disable-csi-dcm`         — Disable HE-LTF for HE20 DCM PPDUs.
-/// - `--disable-csi-beamformed`  — Disable HE-LTF for HE20 Beamformed PPDUs.
-/// - `--csi-he-stbc=<0-2>`       — STBC HE LTF selection (default: 2).
-/// - `--val-scale-cfg=<0-3>`     — Value scale configuration (default: 2).
+/// - `--csi=<on|off>`             — CSI acquisition (master switch).
+/// - `--csi-legacy=<on|off>`      — L-LTF for 11g PPDUs.
+/// - `--csi-ht20=<on|off>`        — HT-LTF for HT20 PPDUs.
+/// - `--csi-ht40=<on|off>`        — HT-LTF for HT40 PPDUs.
+/// - `--val-scale-cfg=<0-3>`      — Value scale configuration (default: 2).
+/// - `--preset=<default>`         — Apply a CSI acquisition preset.
+/// - `--csi-force-lltf=<on|off>`  — Force L-LTF acquisition (ESP32-C5 only).
+/// - `--csi-vht=<on|off>`         — VHT-LTF for VHT20 PPDUs (ESP32-C5 only).
+/// - `--dump-ack=<on|off>`        — Dump 802.11 ACK frames (default: on).
 ///
 /// Prints the updated CSI configuration after applying changes.
 pub fn set_csi<'a>(
@@ -126,166 +159,71 @@ pub fn set_csi<'a>(
     serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
-    let disable_csi = argument_finder(item, args, "disable-csi");
-    let disable_csi_legacy = argument_finder(item, args, "disable-csi-legacy");
-    let disable_csi_ht20 = argument_finder(item, args, "disable-csi-ht20");
-    let disable_csi_ht40 = argument_finder(item, args, "disable-csi-ht40");
-    let disable_csi_su = argument_finder(item, args, "disable-csi-su");
-    let disable_csi_mu = argument_finder(item, args, "disable-csi-mu");
-    let disable_csi_dcm = argument_finder(item, args, "disable-csi-dcm");
-    let disable_csi_beamformed = argument_finder(item, args, "disable-csi-beamformed");
-    let csi_he_stbc = argument_finder(item, args, "csi-he-stbc");
-    let val_scale_cfg = argument_finder(item, args, "val-scale-cfg");
+    // Apply a `--<name>=<on|off>` toggle to a `u32` (0/1) CsiConfig field.
+    macro_rules! apply_flag {
+        ($name:literal, $field:ident) => {
+            if let Ok(Some(v)) = argument_finder(item, args, $name) {
+                match parse_on_off(v) {
+                    Some(b) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().csi_config.$field = b as u32;
+                    }),
+                    None => {
+                        writeln!(serial, "Invalid --{} value '{}' (use on|off)", $name, v).unwrap()
+                    }
+                }
+            }
+        };
+    }
 
-    match disable_csi {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG
-                    .lock(|config| config.borrow_mut().as_mut().unwrap().csi_config.enable = 0)
+    apply_flag!("csi", enable);
+    apply_flag!("csi-legacy", acquire_csi_legacy);
+    apply_flag!("csi-ht20", acquire_csi_ht20);
+    apply_flag!("csi-ht40", acquire_csi_ht40);
+    apply_flag!("dump-ack", dump_ack_en);
+
+    #[cfg(feature = "esp32c5")]
+    {
+        if let Ok(Some(v)) = argument_finder(item, args, "csi-force-lltf") {
+            match parse_on_off(v) {
+                Some(b) => USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().csi_config.acquire_csi_force_lltf =
+                        b;
+                }),
+                None => writeln!(
+                    serial,
+                    "Invalid --csi-force-lltf value '{}' (use on|off)",
+                    v
+                )
+                .unwrap(),
             }
         }
-        Err(_) => (),
+        if let Ok(Some(v)) = argument_finder(item, args, "csi-vht") {
+            match parse_on_off(v) {
+                Some(b) => USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().csi_config.acquire_csi_vht = b;
+                }),
+                None => writeln!(serial, "Invalid --csi-vht value '{}' (use on|off)", v).unwrap(),
+            }
+        }
     }
-    match disable_csi_legacy {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_legacy = 0;
-                })
-            }
+
+    if let Ok(Some(v)) = argument_finder(item, args, "preset") {
+        match v {
+            "default" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().csi_config =
+                    esp_csi_rs::config::CsiConfig::default();
+            }),
+            _ => writeln!(serial, "Invalid --preset value '{}' (use default)", v).unwrap(),
         }
-        Err(_) => (),
     }
-    match disable_csi_ht20 {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_ht20 = 0;
-                })
-            }
+
+    if let Ok(Some(v)) = argument_finder(item, args, "val-scale-cfg") {
+        match v.parse::<u32>() {
+            Ok(val) if val <= 3 => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().csi_config.val_scale_cfg = val;
+            }),
+            _ => writeln!(serial, "Invalid --val-scale-cfg value '{}' (use 0-3)", v).unwrap(),
         }
-        Err(_) => (),
-    }
-    match disable_csi_ht40 {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_ht40 = 0;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_csi_su {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_su = 0;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_csi_mu {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_mu = 0;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_csi_dcm {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_dcm = 0;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_csi_beamformed {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .acquire_csi_beamformed = 0;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match csi_he_stbc {
-        Ok(str) => {
-            if str.is_some() {
-                match str.unwrap().parse::<u32>() {
-                    Ok(val) => USER_CONFIG.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .csi_config
-                            .acquire_csi_he_stbc = val;
-                    }),
-                    Err(_) => writeln!(serial, "Invalid Max Connections").unwrap(),
-                }
-            }
-        }
-        Err(_) => (),
-    }
-    match val_scale_cfg {
-        Ok(str) => {
-            if str.is_some() {
-                match str.unwrap().parse::<u32>() {
-                    Ok(val) => USER_CONFIG.lock(|config| {
-                        config
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .csi_config
-                            .val_scale_cfg = val;
-                    }),
-                    Err(_) => writeln!(serial, "Invalid Max Connections").unwrap(),
-                }
-            }
-        }
-        Err(_) => (),
     }
 
     writeln!(serial, "\nUpdated CSI Configuration:\n").unwrap();
@@ -331,63 +269,51 @@ pub fn set_csi<'a>(
         .unwrap();
         writeln!(
             serial,
-            "Acquire HE20 SU: {}",
-            config.borrow().as_ref().unwrap().csi_config.acquire_csi_su
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Acquire HE20 MU: {}",
-            config.borrow().as_ref().unwrap().csi_config.acquire_csi_mu
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Acquire HE20 DCM: {}",
-            config.borrow().as_ref().unwrap().csi_config.acquire_csi_dcm
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "Acquire HE20 Beamformed: {}",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .csi_config
-                .acquire_csi_beamformed
-        )
-        .unwrap();
-        writeln!(
-            serial,
-            "STBC HE: {}",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .csi_config
-                .acquire_csi_he_stbc
-        )
-        .unwrap();
-        writeln!(
-            serial,
             "Scale Value: {}",
             config.borrow().as_ref().unwrap().csi_config.val_scale_cfg
         )
         .unwrap();
+        writeln!(
+            serial,
+            "Dump ACK: {}",
+            config.borrow().as_ref().unwrap().csi_config.dump_ack_en
+        )
+        .unwrap();
+        #[cfg(feature = "esp32c5")]
+        {
+            writeln!(
+                serial,
+                "Force L-LTF: {}",
+                config
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .csi_config
+                    .acquire_csi_force_lltf
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "VHT20: {}",
+                config.borrow().as_ref().unwrap().csi_config.acquire_csi_vht
+            )
+            .unwrap();
+        }
     });
 }
 
 #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
 /// CLI command: `set-csi` (non-ESP32-C6 variant)
 ///
-/// Configures classic CSI acquisition feature flags in [`USER_CONFIG`].
+/// Configures classic CSI acquisition feature flags in [`USER_CONFIG`]. Each
+/// flag is an explicit `on|off` toggle, so features can be re-enabled after
+/// being turned off without a `reset-config`.
 ///
 /// # Options
-/// - `--disable-lltf`        — Disable LLTF CSI (default: enabled).
-/// - `--disable-htltf`       — Disable HTLTF CSI (default: enabled).
-/// - `--disable-stbc-htltf`  — Disable STBC HTLTF CSI (default: enabled).
-/// - `--disable-ltf-merge`   — Disable LTF Merge (default: enabled).
+/// - `--lltf=<on|off>`        — LLTF CSI (default: on).
+/// - `--htltf=<on|off>`       — HTLTF CSI (default: on).
+/// - `--stbc-htltf=<on|off>`  — STBC HTLTF CSI (default: on).
+/// - `--ltf-merge=<on|off>`   — LTF Merge (default: on).
 ///
 /// Prints the updated CSI configuration after applying changes.
 pub fn set_csi<'a>(
@@ -397,71 +323,26 @@ pub fn set_csi<'a>(
     serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
-    let disable_lltf = argument_finder(item, args, "disable-lltf");
-    let disable_htltf = argument_finder(item, args, "disable-htltf");
-    let disable_stbc_htltf = argument_finder(item, args, "disable-stbc-htltf");
-    let disable_ltf_merge = argument_finder(item, args, "disable-ltf-merge");
+    // Apply a `--<name>=<on|off>` toggle to a `bool` CsiConfig field.
+    macro_rules! apply_flag {
+        ($name:literal, $field:ident) => {
+            if let Ok(Some(v)) = argument_finder(item, args, $name) {
+                match parse_on_off(v) {
+                    Some(b) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().csi_config.$field = b;
+                    }),
+                    None => {
+                        writeln!(serial, "Invalid --{} value '{}' (use on|off)", $name, v).unwrap()
+                    }
+                }
+            }
+        };
+    }
 
-    match disable_lltf {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .lltf_en = false;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_htltf {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .htltf_en = false;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_stbc_htltf {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .stbc_htltf2_en = false;
-                })
-            }
-        }
-        Err(_) => (),
-    }
-    match disable_ltf_merge {
-        Ok(str) => {
-            if str.is_some() {
-                USER_CONFIG.lock(|config| {
-                    config
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .csi_config
-                        .ltf_merge_en = false;
-                })
-            }
-        }
-        Err(_) => (),
-    }
+    apply_flag!("lltf", lltf_en);
+    apply_flag!("htltf", htltf_en);
+    apply_flag!("stbc-htltf", stbc_htltf2_en);
+    apply_flag!("ltf-merge", ltf_merge_en);
 
     writeln!(serial, "\nUpdated CSI Configuration:\n").unwrap();
     USER_CONFIG.lock(|config| {
@@ -480,23 +361,13 @@ pub fn set_csi<'a>(
         writeln!(
             serial,
             "STBC HTLTF Enabled: {}",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .csi_config
-                .stbc_htltf2_en
+            config.borrow().as_ref().unwrap().csi_config.stbc_htltf2_en
         )
         .unwrap();
         writeln!(
             serial,
             "LTF Merge Enabled: {}",
-            config
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .csi_config
-                .ltf_merge_en
+            config.borrow().as_ref().unwrap().csi_config.ltf_merge_en
         )
         .unwrap();
     });
@@ -507,9 +378,17 @@ pub fn set_csi<'a>(
 /// Configures WiFi/radio operating parameters stored in [`USER_CONFIG`].
 ///
 /// # Options
-/// - `--mode=<station|sniffer|esp-now-central|esp-now-peripheral>` — Operating mode.
+/// - `--mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operating mode.
 /// - `--sta-ssid=<SSID>` — SSID for Station mode. Wrap in `'...'` or `"..."` to include spaces; underscores are passed through literally.
 /// - `--sta-password=<PASSWORD>` — Password for Station mode. Same quoting rules as `--sta-ssid`.
+/// - `--ap-ssid=<SSID>` — SSID for wifi-ap mode. Same quoting rules as `--sta-ssid`.
+/// - `--ap-password=<PASSWORD>` — Password for wifi-ap mode (empty = open). Same quoting rules.
+/// - `--ap-dhcp=<on|off>` — Enable/disable the built-in DHCP server in wifi-ap mode.
+/// - `--ap-leases=<1-8>` — DHCP lease pool size in wifi-ap mode. With more than
+///   one lease the ICMP flood round-robins across all associated stations.
+/// - `--ap-burst=<on|off>` — Synchronized burst flood in wifi-ap mode. Every
+///   tick sends one frame back-to-back to every associated station for
+///   time-aligned multi-receiver CSI (total airtime = frequency-hz × leases).
 /// - `--set-channel=<NUMBER>` — WiFi channel (1–14).
 ///
 /// Prints the updated WiFi configuration after applying changes.
@@ -523,9 +402,22 @@ pub fn set_wifi<'a>(
     let mode = argument_finder(item, args, "mode");
     let sta_ssid = argument_finder(item, args, "sta-ssid");
     let sta_password = argument_finder(item, args, "sta-password");
+    let ap_ssid = argument_finder(item, args, "ap-ssid");
+    let ap_password = argument_finder(item, args, "ap-password");
+    let ap_dhcp = argument_finder(item, args, "ap-dhcp");
+    let ap_leases = argument_finder(item, args, "ap-leases");
+    let ap_burst = argument_finder(item, args, "ap-burst");
     let set_channel = argument_finder(item, args, "set-channel");
     let peer_mac = argument_finder(item, args, "peer-mac");
     let ht40 = argument_finder(item, args, "ht40");
+
+    fn parse_on_off(s: &str) -> Option<bool> {
+        match s {
+            "on" | "true" | "1" | "yes" => Some(true),
+            "off" | "false" | "0" | "no" => Some(false),
+            _ => None,
+        }
+    }
 
     match mode {
         Ok(str) => {
@@ -537,11 +429,23 @@ pub fn set_wifi<'a>(
                     "station" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiStation;
                     }),
+                    "wifi-ap" => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiAccessPoint;
+                    }),
                     "esp-now-central" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::EspNowCentral;
                     }),
                     "esp-now-peripheral" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::EspNowPeripheral;
+                        config.borrow_mut().as_mut().unwrap().node_mode =
+                            NodeMode::EspNowPeripheral;
+                    }),
+                    "esp-now-fast-collector" => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode =
+                            NodeMode::EspNowFastCollector;
+                    }),
+                    "esp-now-fast-source" => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode =
+                            NodeMode::EspNowFastSource;
                     }),
                     _ => writeln!(serial, "Invalid WiFi Mode").unwrap(),
                 }
@@ -594,6 +498,59 @@ pub fn set_wifi<'a>(
         }
         Err(_) => (),
     }
+    match ap_ssid {
+        Ok(str) => {
+            if let Some(s) = str {
+                let str_w_space = s.replace('\u{1F}', " ");
+                let mut hpls_str_w_space = heapless::String::<32>::new();
+                hpls_str_w_space.push_str(&str_w_space).unwrap();
+
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().ap_ssid =
+                        hpls_str_w_space.try_into().unwrap();
+                });
+            }
+        }
+        Err(_) => (),
+    }
+    match ap_password {
+        Ok(str) => {
+            if let Some(s) = str {
+                let str_w_space = s.replace('\u{1F}', " ");
+                let mut hpls_str_w_space = heapless::String::<32>::new();
+                hpls_str_w_space.push_str(&str_w_space).unwrap();
+
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().ap_password = hpls_str_w_space
+                });
+            }
+        }
+        Err(_) => (),
+    }
+    if let Ok(Some(s)) = ap_dhcp {
+        match parse_on_off(s) {
+            Some(v) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().serve_dhcp = v;
+            }),
+            None => writeln!(serial, "Invalid --ap-dhcp (use on|off)").unwrap(),
+        }
+    }
+    if let Ok(Some(s)) = ap_leases {
+        match s.parse::<u8>() {
+            Ok(n @ 1..=8) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().ap_lease_count = n;
+            }),
+            _ => writeln!(serial, "Invalid --ap-leases (use 1-8)").unwrap(),
+        }
+    }
+    if let Ok(Some(s)) = ap_burst {
+        match parse_on_off(s) {
+            Some(v) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().ap_sync_burst = v;
+            }),
+            None => writeln!(serial, "Invalid --ap-burst (use on|off)").unwrap(),
+        }
+    }
     // ESP-NOW explicit peer MAC. An empty value clears it (back to automatic
     // magic-prefix pairing); a valid MAC switches to per-node peer filtering.
     if let Ok(Some(s)) = peer_mac {
@@ -613,10 +570,12 @@ pub fn set_wifi<'a>(
     if let Ok(Some(s)) = ht40 {
         match s {
             "above" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().ht40_secondary = Some(SecondaryChannel::Above);
+                config.borrow_mut().as_mut().unwrap().ht40_secondary =
+                    Some(SecondaryChannel::Above);
             }),
             "below" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().ht40_secondary = Some(SecondaryChannel::Below);
+                config.borrow_mut().as_mut().unwrap().ht40_secondary =
+                    Some(SecondaryChannel::Below);
             }),
             "none" | "off" => USER_CONFIG.lock(|config| {
                 config.borrow_mut().as_mut().unwrap().ht40_secondary = None;
@@ -648,6 +607,21 @@ pub fn set_wifi<'a>(
         .unwrap();
         let cfg = config.borrow();
         let cfg = cfg.as_ref().unwrap();
+        if cfg.ap_password.is_empty() {
+            writeln!(
+                serial,
+                "Access Point Settings:\nSSID: '{}', Password: (open), DHCP: {}, Leases: {}, Burst: {}",
+                cfg.ap_ssid, cfg.serve_dhcp, cfg.ap_lease_count, cfg.ap_sync_burst
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                serial,
+                "Access Point Settings:\nSSID: '{}', Password: '{}', DHCP: {}, Leases: {}, Burst: {}",
+                cfg.ap_ssid, cfg.ap_password, cfg.serve_dhcp, cfg.ap_lease_count, cfg.ap_sync_burst
+            )
+            .unwrap();
+        }
         match cfg.peer_mac {
             Some(m) => writeln!(
                 serial,
@@ -746,7 +720,11 @@ pub fn set_collection_mode<'a>(
             }
         },
         _ => {
-            writeln!(serial, "Usage: set-collection-mode --mode=<collector|listener>").unwrap();
+            writeln!(
+                serial,
+                "Usage: set-collection-mode --mode=<collector|listener>"
+            )
+            .unwrap();
             return;
         }
     }
@@ -845,8 +823,26 @@ pub fn show_config<'a>(
         writeln!(serial, "[WiFi]").unwrap();
         writeln!(serial, "  Mode    : {:?}", cfg.node_mode).unwrap();
         writeln!(serial, "  Channel : {}", cfg.channel).unwrap();
+        if matches!(cfg.node_mode, NodeMode::WifiStation) {
+            #[cfg(feature = "esp32c5")]
+            writeln!(
+                serial,
+                "  STA band  : channel {} (C5 dual-band hint)",
+                cfg.channel
+            )
+            .unwrap();
+        }
         writeln!(serial, "  STA SSID: '{}'", cfg.sta_ssid).unwrap();
         writeln!(serial, "  STA Pass: '{}'", cfg.sta_password).unwrap();
+        writeln!(serial, "  AP SSID : '{}'", cfg.ap_ssid).unwrap();
+        if cfg.ap_password.is_empty() {
+            writeln!(serial, "  AP Pass : open").unwrap();
+        } else {
+            writeln!(serial, "  AP Pass : '{}'", cfg.ap_password).unwrap();
+        }
+        writeln!(serial, "  AP DHCP : {}", cfg.serve_dhcp).unwrap();
+        writeln!(serial, "  AP Leases: {}", cfg.ap_lease_count).unwrap();
+        writeln!(serial, "  AP Burst : {}", cfg.ap_sync_burst).unwrap();
         match cfg.peer_mac {
             Some(m) => writeln!(
                 serial,
@@ -885,26 +881,87 @@ pub fn show_config<'a>(
         #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         {
             writeln!(serial, "  Acquire CSI        : {}", cfg.csi_config.enable).unwrap();
-            writeln!(serial, "  Legacy (11g)       : {}", cfg.csi_config.acquire_csi_legacy).unwrap();
-            writeln!(serial, "  HT20               : {}", cfg.csi_config.acquire_csi_ht20).unwrap();
-            writeln!(serial, "  HT40               : {}", cfg.csi_config.acquire_csi_ht40).unwrap();
-            writeln!(serial, "  HE20 SU            : {}", cfg.csi_config.acquire_csi_su).unwrap();
-            writeln!(serial, "  HE20 MU            : {}", cfg.csi_config.acquire_csi_mu).unwrap();
-            writeln!(serial, "  HE20 DCM           : {}", cfg.csi_config.acquire_csi_dcm).unwrap();
-            writeln!(serial, "  HE20 Beamformed    : {}", cfg.csi_config.acquire_csi_beamformed).unwrap();
-            writeln!(serial, "  STBC HE            : {}", cfg.csi_config.acquire_csi_he_stbc).unwrap();
-            writeln!(serial, "  Scale Value        : {}", cfg.csi_config.val_scale_cfg).unwrap();
+            writeln!(
+                serial,
+                "  Legacy (11g)       : {}",
+                cfg.csi_config.acquire_csi_legacy
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  HT20               : {}",
+                cfg.csi_config.acquire_csi_ht20
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  HT40               : {}",
+                cfg.csi_config.acquire_csi_ht40
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  Scale Value        : {}",
+                cfg.csi_config.val_scale_cfg
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  Dump ACK           : {}",
+                cfg.csi_config.dump_ack_en
+            )
+            .unwrap();
+            #[cfg(feature = "esp32c5")]
+            {
+                writeln!(
+                    serial,
+                    "  Force L-LTF        : {}",
+                    cfg.csi_config.acquire_csi_force_lltf
+                )
+                .unwrap();
+                writeln!(
+                    serial,
+                    "  VHT20              : {}",
+                    cfg.csi_config.acquire_csi_vht
+                )
+                .unwrap();
+            }
         }
         #[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
         {
             writeln!(serial, "  LLTF Enabled       : {}", cfg.csi_config.lltf_en).unwrap();
             writeln!(serial, "  HTLTF Enabled      : {}", cfg.csi_config.htltf_en).unwrap();
-            writeln!(serial, "  STBC HTLTF Enabled : {}", cfg.csi_config.stbc_htltf2_en).unwrap();
-            writeln!(serial, "  LTF Merge Enabled  : {}", cfg.csi_config.ltf_merge_en).unwrap();
-            writeln!(serial, "  Channel Filter     : {}", cfg.csi_config.channel_filter_en).unwrap();
-            writeln!(serial, "  Manual Scale       : {}", cfg.csi_config.manu_scale).unwrap();
+            writeln!(
+                serial,
+                "  STBC HTLTF Enabled : {}",
+                cfg.csi_config.stbc_htltf2_en
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  LTF Merge Enabled  : {}",
+                cfg.csi_config.ltf_merge_en
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  Channel Filter     : {}",
+                cfg.csi_config.channel_filter_en
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  Manual Scale       : {}",
+                cfg.csi_config.manu_scale
+            )
+            .unwrap();
             writeln!(serial, "  Shift Bits         : {}", cfg.csi_config.shift).unwrap();
-            writeln!(serial, "  Dump ACK           : {}", cfg.csi_config.dump_ack_en).unwrap();
+            writeln!(
+                serial,
+                "  Dump ACK           : {}",
+                cfg.csi_config.dump_ack_en
+            )
+            .unwrap();
         }
 
         writeln!(serial, "\n===================================\n").unwrap();
@@ -933,8 +990,8 @@ pub fn reset_config<'a>(
 
 /// CLI command: `set-rate`
 ///
-/// Sets the Wi-Fi PHY rate stored in [`USER_CONFIG`]. Only ESP-NOW central /
-/// peripheral modes apply this; sniffer/station derive their rate from the
+/// Sets the Wi-Fi PHY rate stored in [`USER_CONFIG`]. ESP-NOW central / peripheral
+/// and fast simplex modes apply this; sniffer/station derive their rate from the
 /// surrounding radio configuration.
 ///
 /// # Options
@@ -1000,11 +1057,11 @@ pub fn set_phy_rate<'a>(
 /// node via `CSINode::set_protocol` at the start of each collection run.
 ///
 /// # Options
-/// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`, `ax`.
+/// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`.
 ///
 /// `lr` (Espressif long-range) is the default and suits sniffer / ESP-NOW links
-/// between ESP devices; use `n` (or `ax` on Wi-Fi 6 parts) when associating to a
-/// standard AP in station mode.
+/// between ESP devices; use `n` when associating to a standard AP in station
+/// mode.
 pub fn set_protocol_cmd<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
@@ -1021,11 +1078,10 @@ pub fn set_protocol_cmd<'a>(
             "lr" => Some(Protocol::LR),
             "a" => Some(Protocol::A),
             "ac" => Some(Protocol::AC),
-            "ax" => Some(Protocol::AX),
             _ => None,
         },
         _ => {
-            writeln!(serial, "Usage: set-protocol --protocol=<b|g|n|lr|a|ac|ax>").unwrap();
+            writeln!(serial, "Usage: set-protocol --protocol=<b|g|n|lr|a|ac>").unwrap();
             return;
         }
     };
@@ -1037,7 +1093,7 @@ pub fn set_protocol_cmd<'a>(
         None => {
             writeln!(
                 serial,
-                "Invalid protocol. Use one of: b, g, n, lr (default), a, ac, ax."
+                "Invalid protocol. Use one of: b, g, n, lr (default), a, ac."
             )
             .unwrap();
         }
@@ -1148,7 +1204,11 @@ pub fn set_csi_delivery_cmd<'a>(
                 .unwrap();
             }
             _ => {
-                writeln!(serial, "Invalid mode. Use 'off', 'callback', 'async', or 'raw'.").unwrap();
+                writeln!(
+                    serial,
+                    "Invalid mode. Use 'off', 'callback', 'async', or 'raw'."
+                )
+                .unwrap();
             }
         }
     }
@@ -1255,18 +1315,21 @@ pub fn cli_info<'a>(
 
 /// CLI command: `restart`
 ///
-/// Performs a clean software reset of the chip via
-/// [`esp_hal::system::software_reset`]. This is the device half of the
-/// native-USB reset story: on boards whose serial transport is the built-in
-/// USB-Serial-JTAG peripheral, resetting drops and re-enumerates the USB
-/// device. Because host tooling pins to the board's MAC (see [`device_mac`] /
-/// the `mac=` field of `info`) rather than the `/dev/ttyACM*` path, the
-/// re-enumeration is a non-event — the per-device task re-binds to the same
-/// physical board on the new node number.
+/// Requests a software reset of the chip. The reset is NOT performed inline:
+/// resetting with the radio live has been observed to hang the next boot on
+/// ESP32-C5 (single ROM banner, application never starts, only the EN button
+/// recovers). Instead this signals the collection task — which owns the WiFi
+/// controller — to stop any active run, deinit the radio (esp-radio
+/// `wifi_deinit` via the controller's destructor), and only then call
+/// [`esp_hal::system::software_reset`].
 ///
-/// The function diverges (`software_reset` returns `!`); the firmware reboots
-/// and re-emits the welcome banner — including the magic identification line
-/// and `mac=` — which the host greps to confirm the board is back.
+/// On boards whose serial transport is the built-in USB-Serial-JTAG
+/// peripheral, the reset drops and re-enumerates the USB device. Because host
+/// tooling pins to the board's MAC (the `mac=` field of `info`) rather than
+/// the `/dev/ttyACM*` path, the re-enumeration is a non-event — the
+/// per-device task re-binds to the same physical board on the new node
+/// number, and the reboot re-emits the welcome banner the host greps to
+/// confirm the board is back.
 pub fn restart_cmd<'a>(
     _menu: &Menu<SerialInterface, Context>,
     _item: &Item<SerialInterface, Context>,
@@ -1274,11 +1337,17 @@ pub fn restart_cmd<'a>(
     serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
-    writeln!(serial, "\nRestarting...").unwrap();
+    writeln!(serial, "\nRestarting (radio deinit first)...").unwrap();
     // Push the message out of the peripheral FIFO before the reset tears the
     // transport down, otherwise it can be lost on the way out.
     let _ = Write::flush(serial);
-    esp_hal::system::software_reset();
+    crate::config::RESTART_PENDING.store(true, Ordering::Relaxed);
+    crate::config::RESTART_SIGNAL.signal(());
+    if crate::config::IS_COLLECTING.load(Ordering::Relaxed) {
+        // Unwind the active run first; the collection task performs the
+        // radio deinit + reset right after the run tears down.
+        crate::config::STOP_REQUEST.signal(());
+    }
 }
 
 /// CLI command: `show-stats` (compiled in only with the `statistics` feature)
@@ -1305,7 +1374,12 @@ pub fn show_stats<'a>(
     writeln!(serial, "  TX Rate (Hz)     : {}", get_tx_rate_hz()).unwrap();
     writeln!(serial, "  RX Dropped Pkts  : {}", get_dropped_packets_rx()).unwrap();
     writeln!(serial, "  TX Queued Pkts   : {}", get_tx_queued_packets()).unwrap();
-    writeln!(serial, "  TX Confirmed Pkts: {}", get_tx_confirmed_packets()).unwrap();
+    writeln!(
+        serial,
+        "  TX Confirmed Pkts: {}",
+        get_tx_confirmed_packets()
+    )
+    .unwrap();
     writeln!(serial, "  TX Failed Pkts   : {}", get_tx_failed_packets()).unwrap();
     writeln!(serial, "================================\n").unwrap();
 }

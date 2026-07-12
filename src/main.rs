@@ -4,7 +4,10 @@
 mod cli;
 mod config;
 
-use crate::config::{UserConfig, DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, STOP_REQUEST, USER_CONFIG};
+use crate::config::{
+    DONE_SIGNAL, IS_COLLECTING, RESTART_PENDING, RESTART_SIGNAL, START_SIGNAL, STOP_REQUEST,
+    USER_CONFIG, UserConfig,
+};
 // `is_jtag` only exists under runtime auto-detection (`auto`); forced
 // `jtag-serial`/`uart` backends know their transport at compile time and never
 // call it. Gate the import to match its definition so forced-backend builds
@@ -18,8 +21,7 @@ use crate::config::{UserConfig, DONE_SIGNAL, IS_COLLECTING, START_SIGNAL, STOP_R
         feature = "esp32s3"
     )
 ))]
-use cli::is_jtag;
-use cli::{Context, ROOT_MENU};
+use cli::SerialInterface;
 #[cfg(all(
     feature = "auto",
     any(
@@ -29,20 +31,34 @@ use cli::{Context, ROOT_MENU};
         feature = "esp32s3"
     )
 ))]
-use cli::SerialInterface;
+use cli::is_jtag;
+use cli::{Context, ROOT_MENU};
 use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, Either3};
+use embassy_futures::select::select;
+// During collection the JTAG+auto build polls for 'q' with the raw OUT-EP peek
+// only (2-arm `select`); other builds fall back to the async `Read` arm
+// (`select3`). See the collection-stop loop in `main`.
+// `Either` is the return type of the unconditional 2-arm `select` used by the
+// restart-command loop in `csi_collection`, so it must be imported for every
+// target. `Either3`/`select3` stay gated to the builds that use the 3-arm
+// async `Read` arm.
+use embassy_futures::select::Either;
+#[cfg(not(all(
+    any(feature = "esp32c3", feature = "esp32c5", feature = "esp32c6", feature = "esp32s3"),
+    feature = "auto"
+)))]
+use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
 use embedded_io::Write;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
-use esp_csi_rs::csi::CSIDataPacket;
-use esp_csi_rs::logging::logging::{init_logger, log_csi, LogMode};
+use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    set_csi_callback, set_csi_logging_enabled, set_csi_raw_callback, set_raw_listen, CSINode,
-    CSINodeClient, CSINodeHardware, CentralOpMode, EspNowConfig, Node, PeripheralOpMode,
-    WifiSnifferConfig, WifiStationConfig,
+    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, CsiDeliveryMode,
+    EspNowConfig, Node, PeripheralOpMode, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
+    clear_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
+    set_raw_listen,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -58,14 +74,28 @@ use esp_hal::uart::Uart;
     )
 ))]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{AuthenticationMethod, Interfaces, WifiController};
+use esp_radio::wifi::{AuthenticationMethod, Interfaces, PowerSaveMode, WifiController};
 use menu::*;
 
 esp_app_desc!();
 
 extern crate alloc;
 use alloc::string::ToString;
+
+/// Reclaimed-RAM heap size per chip (link-tested against this firmware).
+///
+/// RISC-V parts (C3/C5/C6) top out at 64 KiB once the CLI + Wi-Fi stacks are
+/// linked; C5 association needs more than the old 60 KiB default.
+/// Xtensa parts have more `dram2` headroom — ESP32 can use the same 96 KiB
+/// budget as esp-csi-rs sniffer experiments; ESP32-S3 fits 72 KiB.
+#[cfg(feature = "esp32")]
+const HEAP_SIZE: usize = 98_440;
+#[cfg(feature = "esp32s3")]
+const HEAP_SIZE: usize = 72_000;
+#[cfg(any(feature = "esp32c3", feature = "esp32c5", feature = "esp32c6"))]
+const HEAP_SIZE: usize = 65_536;
 
 static WIFI_CONTROLLER: static_cell::StaticCell<WifiController<'static>> =
     static_cell::StaticCell::new();
@@ -142,32 +172,10 @@ fn jtag_peek_for_stop() -> bool {
     false
 }
 
-/// CSI delivery callback registered via `esp_csi_rs::set_csi_callback` for the
-/// duration of each `start` run. Runs synchronously inside the WiFi callback
-/// context for every captured packet, which is the only path guaranteed to
-/// fire even when the embassy executor and RX-interrupt waker are starved by
-/// `esp_println`'s critical sections during sustained CSI bursts.
-///
-/// Two responsibilities, in order:
-/// 1. Drain the USB-Serial-JTAG OUT-EP FIFO via raw register reads and signal
-///    `STOP_REQUEST` if 'q'/'Q' is present. This is the deterministic stop-key
-///    path — packet rate is the polling rate.
-/// 2. Clone the packet and hand it to `log_csi` so the user keeps seeing the
-///    CSI line stream they had before. The clone is ~640 B (`Vec<i8, 612>`
-///    inline + metadata) and amounts to the same work the inline-log path
-///    used to do, just under our control.
-fn csi_log_and_check(packet: &CSIDataPacket) {
-    if jtag_peek_for_stop() {
-        STOP_REQUEST.signal(());
-    }
-    log_csi(packet.clone());
-}
-
 /// Raw CSI fast-path callback (CPU-benchmark mode). The WiFi callback invokes
 /// this and returns *before* building the ~640 B `CSIDataPacket`, so the
 /// per-frame cost is just the dispatch — matching the ESP-IDF reference. No CSI
-/// data is delivered or logged, and the q-key stop peek of `csi_log_and_check`
-/// is intentionally absent (raw runs are duration-bound / reset-driven).
+/// data is delivered or logged; stop relies on duration / reset / main-loop `q`.
 fn raw_csi_noop() {}
 
 /// Build the [`EspNowConfig`] for an ESP-NOW run from the user config snapshot.
@@ -186,6 +194,41 @@ fn build_espnow_config(user_config: &UserConfig) -> EspNowConfig {
         cfg = cfg.with_ht40(secondary);
     }
     cfg
+}
+
+fn build_espnow_fast_config(user_config: &UserConfig) -> EspNowConfig {
+    let mut cfg = EspNowConfig::fast_default().with_channel(user_config.channel);
+    if let Some(mac) = user_config.peer_mac {
+        cfg = cfg.with_peer_mac(mac);
+    }
+    if let Some(secondary) = user_config.ht40_secondary {
+        cfg = cfg.with_ht40(secondary);
+    }
+    cfg
+}
+
+fn build_wifi_ap_config(user_config: &UserConfig) -> WifiApConfig {
+    let auth = if user_config.ap_password.is_empty() {
+        AuthenticationMethod::None
+    } else {
+        AuthenticationMethod::Wpa2Personal
+    };
+    let mut ap_radio_config = AccessPointConfig::default()
+        .with_ssid(user_config.ap_ssid.as_str().to_string())
+        .with_channel(user_config.channel)
+        .with_auth_method(auth);
+    if !user_config.ap_password.is_empty() {
+        ap_radio_config =
+            ap_radio_config.with_password(user_config.ap_password.as_str().to_string());
+    }
+    WifiApConfig::new(
+        ap_radio_config,
+        user_config.channel,
+        user_config.ht40_secondary,
+    )
+    .with_dhcp_server(user_config.serve_dhcp)
+    .with_lease_pool(user_config.ap_lease_count)
+    .with_sync_burst(user_config.ap_sync_burst)
 }
 
 /// Walk the per-line shadow buffer and return the open quote char, if any.
@@ -217,10 +260,31 @@ enum NodeMode {
     WifiSniffer,
     /// Connects to an existing WiFi network as a station.
     WifiStation,
+    /// Self-contained softAP CSI collector (DHCP + ICMP flood).
+    WifiAccessPoint,
     /// Acts as the central (initiating) device in an ESP-NOW pair.
     EspNowCentral,
     /// Acts as the peripheral (responding) device in an ESP-NOW pair.
     EspNowPeripheral,
+    /// Asymmetric ESP-NOW simplex collector (sparse beacon, then RX-only).
+    EspNowFastCollector,
+    /// Asymmetric ESP-NOW simplex source (unicast flood at forced PHY).
+    EspNowFastSource,
+}
+
+/// esp-backtrace `custom-halt` hook: called after the panic message and
+/// backtrace have been printed. Reboot into a clean CLI instead of parking
+/// the CPU forever — a halted board answers nothing on serial (not even
+/// `restart`), DTR/RTS resets don't reach the chip at runtime, and recovery
+/// would otherwise require a physical button press, defeating webserver
+/// automation. The spin-wait lets the USB-Serial-JTAG FIFO drain the panic
+/// output before the reset wipes it.
+#[unsafe(no_mangle)]
+fn custom_halt() -> ! {
+    for _ in 0..100_000_000u32 {
+        core::hint::spin_loop();
+    }
+    rwdt_full_system_reset();
 }
 
 #[esp_rtos::main]
@@ -233,9 +297,9 @@ async fn main(spawner: Spawner) -> ! {
     // already in the executor by the time esp_rtos::start hands control over.
     init_logger(spawner, LogMode::ArrayList);
 
-    // Allocate heap space. v0.6.0 places the allocator in reclaimed RAM so
-    // internal RAM stays available for Wi-Fi / RTOS task stacks.
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 61440);
+    // Allocate heap space in reclaimed RAM (sizes in [`HEAP_SIZE`] — per-chip max
+    // that still links with the CLI + Wi-Fi stacks).
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: HEAP_SIZE);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -245,10 +309,23 @@ async fn main(spawner: Spawner) -> ! {
     // Initialize ESP radio + Wi-Fi controller. v0.6.0 folded the standalone
     // `esp_radio::init()` call into `esp_radio::wifi::new`, so there is no
     // longer a separately-staticked radio controller.
-    let config_radio = esp_radio::wifi::ControllerConfig::default();
-    let (wifi_controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, config_radio)
-            .expect("Failed to initialize Wi-Fi controller");
+    //
+    // AMPDU aggregates multiple frames into one PPDU, which the CSI callback only
+    // fires once for — fewer, clumpier CSI events and Block-Ack recovery stalls
+    // after a lost subframe. Disabled globally for clean one-PPDU-per-frame CSI
+    // capture, matching Espressif's esp-csi reference and esp-csi-rs's own
+    // AP/STA examples. Halved dynamic buffer counts (32 → 16 each way)
+    // bound the driver's transient draw on the shared esp-alloc heap, also
+    // matching the examples; overflow surfaces as bounded netstack frame
+    // drops, which CSI capture never sees (CSI comes from the PHY callback).
+    let config_radio = esp_radio::wifi::ControllerConfig::default()
+        .with_ampdu_rx_enable(false)
+        .with_ampdu_tx_enable(false)
+        .with_dynamic_rx_buf_num(16)
+        .with_dynamic_tx_buf_num(16)
+        .with_rx_ba_win(4);
+    let (wifi_controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+        .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
 
@@ -325,9 +402,7 @@ async fn main(spawner: Spawner) -> ! {
         ))]
         {
             if is_jtag() {
-                SerialInterface::UsbJtag(
-                    UsbSerialJtag::new(peripherals.USB_DEVICE).into_async(),
-                )
+                SerialInterface::UsbJtag(UsbSerialJtag::new(peripherals.USB_DEVICE).into_async())
             } else {
                 SerialInterface::Uart(
                     Uart::new(peripherals.UART0, esp_hal::uart::Config::default())
@@ -376,39 +451,32 @@ async fn main(spawner: Spawner) -> ! {
             Write::write_all(&mut runner.interface, b"\r\x1b[2K").ok();
             // CLI locked during collection: only 'q'/'Q' triggers an early stop.
             //
-            // Two parallel paths read the host byte stream:
-            //   1. The async `Read::read` arm, which wakes on the JTAG RX
-            //      interrupt (fast path when interrupts aren't being starved).
-            //   2. A 5 ms Timer arm that calls `jtag_peek_for_stop` — a raw
-            //      register poll of the USB-Serial-JTAG OUT-EP FIFO. This
-            //      bypasses the async waker entirely and guarantees the byte
-            //      is pulled even when the WiFi/CSI ISR storm + esp-println's
-            //      critical sections suppress the RX interrupt.
-            //
-            // The two paths are race-safe: whichever sees the byte first wins,
-            // signals STOP_REQUEST, and the other arm is dropped on the next
-            // loop iteration (a fresh Read::read will simply see an empty FIFO).
-            //
-            // 32-byte chunk because USB-CDC delivers whole packets — a single
-            // 'q' may share a packet with CR/LF.
-            let mut chunk = [0_u8; 32];
             // Latch so the `Stopping...` line prints once per run. Without
             // this, every subsequent 'q' the host pushes (or every key repeat
             // while the user holds it) re-fires the print before
             // `DONE_SIGNAL` arrives, producing a wall of duplicates.
             // Re-signalling `STOP_REQUEST` itself is harmless and idempotent.
             let mut stop_announced = false;
+
+            // JTAG + `auto`: poll for 'q' with the raw OUT-EP peek ONLY. We must
+            // NOT operate the CLI's async `UsbSerialJtag` reader during a run:
+            // its `Read` toggles the shared USB_SERIAL_JTAG interrupt-enable
+            // register, while esp-csi-rs's logger drives a *second*
+            // `UsbSerialJtag` (output) on the same peripheral. Racing INT_ENA
+            // updates between the two strand the logger's IN-empty wakeup, which
+            // wedges CSI output mid-run — the executor stays alive (so 'q' via
+            // this peek still stops it) and the peer keeps streaming, but this
+            // node emits nothing until a stop/start. `jtag_peek_for_stop` reads
+            // only FIFO data/status, never INT_ENA, so it can't cause that race.
+            #[cfg(all(
+                any(feature = "esp32c3", feature = "esp32c5", feature = "esp32c6", feature = "esp32s3"),
+                feature = "auto"
+            ))]
             loop {
-                match select3(
-                    embedded_io_async::Read::read(&mut runner.interface, &mut chunk),
-                    DONE_SIGNAL.wait(),
-                    Timer::after(Duration::from_millis(5)),
-                )
-                .await
-                {
-                    Either3::First(res) => {
-                        let n = res.unwrap_or(0);
-                        if chunk[..n].iter().any(|&b| b == b'q' || b == b'Q') {
+                match select(DONE_SIGNAL.wait(), Timer::after(Duration::from_millis(5))).await {
+                    Either::First(_) => break, // collection ended
+                    Either::Second(_) => {
+                        if jtag_peek_for_stop() {
                             STOP_REQUEST.signal(());
                             if !stop_announced {
                                 Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
@@ -417,14 +485,48 @@ async fn main(spawner: Spawner) -> ! {
                             }
                         }
                     }
-                    Either3::Second(_) => break, // collection ended
-                    Either3::Third(_) => {
-                        if jtag_peek_for_stop() {
-                            STOP_REQUEST.signal(());
-                            if !stop_announced {
-                                Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
-                                    .ok();
-                                stop_announced = true;
+                }
+            }
+
+            // UART / non-peek builds: no raw peek exists, so the async `Read` is
+            // the only way to see 'q'. A UART transport has no second output
+            // driver on the same peripheral, so the INT_ENA race above does not
+            // apply here. 32-byte chunk because USB-CDC delivers whole packets —
+            // a single 'q' may share a packet with CR/LF.
+            #[cfg(not(all(
+                any(feature = "esp32c3", feature = "esp32c5", feature = "esp32c6", feature = "esp32s3"),
+                feature = "auto"
+            )))]
+            {
+                let mut chunk = [0_u8; 32];
+                loop {
+                    match select3(
+                        embedded_io_async::Read::read(&mut runner.interface, &mut chunk),
+                        DONE_SIGNAL.wait(),
+                        Timer::after(Duration::from_millis(5)),
+                    )
+                    .await
+                    {
+                        Either3::First(res) => {
+                            let n = res.unwrap_or(0);
+                            if chunk[..n].iter().any(|&b| b == b'q' || b == b'Q') {
+                                STOP_REQUEST.signal(());
+                                if !stop_announced {
+                                    Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
+                                        .ok();
+                                    stop_announced = true;
+                                }
+                            }
+                        }
+                        Either3::Second(_) => break, // collection ended
+                        Either3::Third(_) => {
+                            if jtag_peek_for_stop() {
+                                STOP_REQUEST.signal(());
+                                if !stop_announced {
+                                    Write::write_all(&mut runner.interface, b"\r\nStopping...\r\n")
+                                        .ok();
+                                    stop_announced = true;
+                                }
                             }
                         }
                     }
@@ -564,9 +666,17 @@ async fn csi_collection(
     controller: &'static mut WifiController<'static>,
 ) {
     loop {
-        // Wait for a start signal from the CLI
-        let duration = START_SIGNAL.wait().await;
-        START_SIGNAL.reset();
+        // Wait for a start signal from the CLI — or a restart request, which
+        // this task must service because it owns the WiFi controller (the
+        // radio must be deinitialized before the chip resets; see
+        // `radio_off_and_restart`).
+        let duration = match select(START_SIGNAL.wait(), RESTART_SIGNAL.wait()).await {
+            Either::First(duration) => {
+                START_SIGNAL.reset();
+                duration
+            }
+            Either::Second(()) => radio_off_and_restart(controller).await,
+        };
 
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
@@ -580,21 +690,49 @@ async fn csi_collection(
                 WifiSnifferConfig::default().with_channel(user_config.channel),
             )),
             NodeMode::WifiStation => {
-                let client_config = StationConfig::default()
+                let auth = if user_config.sta_password.is_empty() {
+                    AuthenticationMethod::None
+                } else {
+                    AuthenticationMethod::Wpa2Personal
+                };
+                let mut client_config = StationConfig::default()
                     .with_ssid(user_config.sta_ssid.as_str().to_string())
-                    .with_password(user_config.sta_password.as_str().to_string())
-                    .with_auth_method(AuthenticationMethod::Wpa2Personal);
-                Node::Central(CentralOpMode::WifiStation(WifiStationConfig {
-                    client_config,
-                }))
+                    .with_auth_method(auth);
+                if !user_config.sta_password.is_empty() {
+                    client_config = client_config
+                        .with_password(user_config.sta_password.as_str().to_string());
+                }
+                Node::Central(CentralOpMode::WifiStation(
+                    WifiStationConfig::new(client_config).with_channel_hint(user_config.channel),
+                ))
             }
+            NodeMode::WifiAccessPoint => Node::Central(CentralOpMode::WifiAccessPoint(
+                build_wifi_ap_config(&user_config),
+            )),
             NodeMode::EspNowCentral => {
                 Node::Central(CentralOpMode::EspNow(build_espnow_config(&user_config)))
             }
             NodeMode::EspNowPeripheral => {
                 Node::Peripheral(PeripheralOpMode::EspNow(build_espnow_config(&user_config)))
             }
+            NodeMode::EspNowFastCollector => Node::Central(CentralOpMode::EspNowFastCollector(
+                build_espnow_fast_config(&user_config),
+            )),
+            NodeMode::EspNowFastSource => Node::Peripheral(PeripheralOpMode::EspNowFastSource(
+                build_espnow_fast_config(&user_config),
+            )),
         };
+
+        // Throughput-oriented modes disable Wi-Fi power saving (matches esp-csi-rs examples).
+        if matches!(
+            user_config.node_mode,
+            NodeMode::WifiAccessPoint
+                | NodeMode::WifiStation
+                | NodeMode::EspNowFastCollector
+                | NodeMode::EspNowFastSource
+        ) {
+            let _ = controller.set_power_saving(PowerSaveMode::None);
+        }
 
         // Non-zero trigger_freq enables traffic generation
         let traffic_freq = if user_config.trigger_freq == 0 {
@@ -613,7 +751,24 @@ async fn csi_collection(
             hardware,
         );
         // Apply IO task configuration (TX/RX direction toggles).
-        node.set_io_tasks(user_config.io_tasks);
+        // `set-traffic --frequency-hz=0` must mean NO generated traffic: with
+        // TX left on, esp-csi-rs falls back to a default flood rate when the
+        // frequency is None (100 Hz station / 1000 Hz AP). Restricted to the
+        // WiFi infra modes — ESP-NOW modes use the TX task for their own
+        // transmissions, not the ICMP flood.
+        let mut io_tasks = user_config.io_tasks;
+        if user_config.trigger_freq == 0
+            && matches!(
+                user_config.node_mode,
+                NodeMode::WifiAccessPoint | NodeMode::WifiStation
+            )
+        {
+            io_tasks.tx_enabled = false;
+        }
+        node.set_io_tasks(io_tasks);
+        // `set-traffic --unsolicited=on`: flood unsolicited echo replies —
+        // one-directional traffic, no reply contention (see UserConfig doc).
+        node.set_flood_unsolicited_reply(user_config.flood_unsolicited);
 
         // Apply the user-selected Wi-Fi PHY protocol (set via `set-protocol`).
         // ESP-NOW / sniffer modes additionally pin the PHY rate; station mode
@@ -635,31 +790,27 @@ async fn csi_collection(
             core::future::pending::<()>().await
         };
 
-        // Route CSI delivery through our own callback for this run. The callback
-        // peeks the JTAG RX FIFO synchronously per packet and writes the CSI
-        // line, giving us a deterministic q-key stop path that doesn't depend
-        // on the embassy executor or RX interrupt — both of which get starved
-        // by the WiFi/CSI hot path. `reset_globals` at the end of run/run_duration
-        // nulls CSI_CALLBACK and the gates back to Off, so re-registering on
-        // each iteration of this task is correct.
-        set_csi_logging_enabled(false);
+        // CSI output: use esp-csi-rs's inline `log_csi` path (same as the
+        // esp-csi-rs examples). Do **not** register a per-packet `set_csi_callback` here —
+        // the old callback cloned every ~640 B frame and drained the JTAG RX FIFO
+        // on each one, capping throughput around ~10 Hz. The main loop polls for
+        // `q` every 5 ms while `IS_COLLECTING` (see below).
+        clear_csi_callback();
+        set_csi_delivery_mode(CsiDeliveryMode::Off);
         if user_config.delivery_raw {
-            // Zero-copy CPU-benchmark path: dispatch only, no packet build, no
-            // logging. Also skip ESP-NOW control-packet ingest so the per-frame
-            // cost matches the ESP-IDF reference. The q-key stop peek is not
-            // available here, so raw runs rely on the duration / reset path.
+            set_csi_logging_enabled(false);
             set_raw_listen(true);
             set_csi_raw_callback(raw_csi_noop);
         } else {
             set_raw_listen(false);
-            set_csi_callback(csi_log_and_check);
+            match user_config.collection_mode {
+                CollectionMode::Collector => set_csi_logging_enabled(true),
+                CollectionMode::Listener => set_csi_logging_enabled(false),
+            }
         }
 
         // Run for a fixed duration or indefinitely. In both arms run_duration/run
         // listens to esp-csi-rs's internal STOP_SIGNAL, so send_stop() unwinds them.
-        // Note: with Callback delivery the async CSI queue is never written, so
-        // the indefinite arm cannot use `print_csi_w_metadata` (it would park
-        // forever). The callback is the sole writer.
         match duration {
             Some(secs) => {
                 let mut client = CSINodeClient::new();
@@ -676,5 +827,47 @@ async fn csi_collection(
 
         // Unlock the CLI in the main loop
         DONE_SIGNAL.signal(());
+
+        // A `restart` issued mid-collection stops the run (via STOP_REQUEST)
+        // and lands here: deinit the radio, then reset.
+        if RESTART_PENDING.load(Ordering::Relaxed) {
+            radio_off_and_restart(controller).await;
+        }
+    }
+}
+
+/// Deinit the radio, then hard-reset the chip via the RTC watchdog.
+///
+/// Resetting with the radio live has been observed to hang the next boot on
+/// ESP32-C5: the ROM banner prints once and the application never starts —
+/// only the EN button or a USB power cycle recovers. Running the controller's
+/// destructor in place invokes esp-radio's `wifi_deinit` (full RF/driver
+/// teardown) so the next boot starts from quiet hardware. The controller
+/// reference is dead after `drop_in_place`, which is sound only because this
+/// function diverges into the reset without touching it again.
+async fn radio_off_and_restart(controller: &mut WifiController<'static>) -> ! {
+    unsafe { core::ptr::drop_in_place(controller as *mut WifiController<'static>) };
+    // Let the deinit settle and the "Restarting..." text drain the FIFO.
+    Timer::after(Duration::from_millis(200)).await;
+    rwdt_full_system_reset();
+}
+
+/// Deepest reset software can trigger: RWDT stage-0 `ResetSystem` resets the
+/// main system, the power management unit AND the RTC peripherals. A plain
+/// HP-system software reset (`rst:0x3 RTC_SW_HPSYS`) hangs the next boot on
+/// these ESP32-C5 boards — the ROM banner prints and the application never
+/// starts, radio deinit or not — while this watchdog reset is the closest
+/// software equivalent of the EN button.
+fn rwdt_full_system_reset() -> ! {
+    use esp_hal::rtc_cntl::{Rtc, RwdtStage, RwdtStageAction};
+    // Stealing LPWR is sound here: this function diverges into a chip reset,
+    // so no other owner can observe the aliased peripheral afterwards.
+    let mut rtc = Rtc::new(unsafe { esp_hal::peripherals::LPWR::steal() });
+    rtc.rwdt.set_stage_action(RwdtStage::Stage0, RwdtStageAction::ResetSystem);
+    rtc.rwdt
+        .set_timeout(RwdtStage::Stage0, esp_hal::time::Duration::from_millis(50));
+    rtc.rwdt.enable();
+    loop {
+        core::hint::spin_loop();
     }
 }

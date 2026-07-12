@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 
 [features]
@@ -32,9 +32,9 @@ defmt = [
 ## logging), which is mandatory here: the JTAG backend can block under sustained
 ## CSI load, and a blocked log write stalls the collection hot path and drops
 ## packets. This is the recommended setup for maximum collection throughput with
-## `println`/serialized output. This mirrors esp-csi-rs 0.7.0, where
-## `esp-csi-rs/jtag-serial` itself enables `esp-csi-rs/async-print`; the explicit
-## `async-print` here keeps this crate's own feature flag in sync.
+## `println`/serialized output. The explicit `async-print` here keeps this
+## crate's own feature flag in sync (esp-csi-rs 0.8.0 no longer auto-enables
+## `async-print` from `jtag-serial`).
 ## NOTE: do not combine with `defmt` (see the `defmt` feature above).
 jtag-serial = ["esp-csi-rs/jtag-serial", "async-print"]
 ## Force the UART backend for logging (not recommended, much slower than JTAG backend).
@@ -57,7 +57,7 @@ esp32c5 = [
     "esp-csi-rs/esp32c5"
 ]
 
-## Support for the ESP32-C6 (WiFi 6)
+## Support for the ESP32-C6
 esp32c6 = [
     "esp-csi-rs/esp32c6"
 ]
@@ -71,6 +71,10 @@ esp32s3 = [
 esp-bootloader-esp-idf = "0.5.0"
 esp-backtrace = { version = "0.19.0", features = [
     "panic-handler",
+    # Call our `custom_halt` (which reboots) after printing a panic, instead
+    # of parking the CPU forever — a halted board is unreachable over serial
+    # and needs a physical button press, which defeats webserver automation.
+    "custom-halt",
 ] }
 esp-hal = { version = "~1.1", default-features = false, features = [
     "unstable",
@@ -101,7 +105,7 @@ embassy-time = { version = "0.5.1" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { version = "0.7.3", default-features = false }
+esp-csi-rs = { version = "0.9", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint

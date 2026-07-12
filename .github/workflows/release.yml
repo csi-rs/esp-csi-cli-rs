@@ -1,0 +1,151 @@
+name: Release firmware binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.7.2). Required for manual runs."
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.chip.feature }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chip:
+          - feature: esp32
+            target: xtensa-esp32-none-elf
+            toolchain: esp
+            espflash_chip: esp32
+          - feature: esp32c3
+            target: riscv32imc-unknown-none-elf
+            toolchain: stable
+            espflash_chip: esp32c3
+          - feature: esp32c5
+            target: riscv32imac-unknown-none-elf
+            toolchain: stable
+            espflash_chip: esp32c5
+          - feature: esp32c6
+            target: riscv32imac-unknown-none-elf
+            toolchain: stable
+            espflash_chip: esp32c6
+          - feature: esp32s3
+            target: xtensa-esp32s3-none-elf
+            toolchain: esp
+            espflash_chip: esp32s3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ESP Rust toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        with:
+          default: false
+          buildtargets: ${{ matrix.chip.feature }}
+          version: 1.93.0.0
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Install espflash
+        run: cargo +stable install espflash --locked --version 4.4.0
+
+      - name: Build release ELF (${{ matrix.chip.feature }})
+        run: |
+          set -euxo pipefail
+          cargo +${{ matrix.chip.toolchain }} build \
+            --locked --release \
+            --target ${{ matrix.chip.target }} \
+            --features "${{ matrix.chip.feature }}"
+
+      - name: Convert ELF to merged flash image
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          elf="target/${{ matrix.chip.target }}/release/esp-csi-cli-rs"
+          out="dist/esp-csi-cli-rs-${{ matrix.chip.feature }}.bin"
+          espflash save-image \
+            --chip ${{ matrix.chip.espflash_chip }} \
+            --merge \
+            "$elf" \
+            "$out"
+
+      - name: Upload chip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.chip.feature }}
+          path: dist/esp-csi-cli-rs-${{ matrix.chip.feature }}.bin
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag and version
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v ]]; then
+            echo "tag must start with v (got: $TAG)" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: firmware-*
+          merge-multiple: true
+
+      - name: Collect firmware binaries
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          find artifacts -name 'esp-csi-cli-rs-*.bin' -exec cp {} dist/ \;
+          ls -la dist/
+          chmod +x scripts/generate-release-manifest.sh scripts/extract-release-notes.sh
+          ./scripts/generate-release-manifest.sh \
+            "${{ steps.meta.outputs.version }}" \
+            "${{ steps.meta.outputs.tag }}" \
+            dist \
+            "${{ github.repository }}"
+          ./scripts/extract-release-notes.sh "${{ steps.meta.outputs.tag }}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: esp-csi-cli-rs ${{ steps.meta.outputs.tag }}
+          body_path: release-notes.md
+          files: |
+            dist/esp-csi-cli-rs-esp32.bin
+            dist/esp-csi-cli-rs-esp32c3.bin
+            dist/esp-csi-cli-rs-esp32c5.bin
+            dist/esp-csi-cli-rs-esp32c6.bin
+            dist/esp-csi-cli-rs-esp32s3.bin
+            dist/manifest.json
+          fail_on_unmatched_files: true

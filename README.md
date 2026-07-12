@@ -18,7 +18,7 @@ In order to use this crate, you would need to flash the source code for your tar
 
 ## Features
 
-* **Multiple Wi-Fi Modes:** Configure the ESP device as a Station, Sniffer, ESP-NOW Central, or ESP-NOW Peripheral.
+* **Multiple Wi-Fi Modes:** Configure the ESP device as a Station, Sniffer, softAP collector (`wifi-ap`), ESP-NOW Central/Peripheral, or ESP-NOW fast simplex (collector + source).
 * **Traffic Generation:** Generate traffic at configurable intervals.
 * **Fine-grained CSI Control:** Enable or disable specific CSI features like LLTF, HTLTF, STBC HTLTF, and LTF Merge.
 * **PHY Rate / IO Task Control:** Pin the ESP-NOW PHY rate and toggle TX or RX direction tasks at the CLI.
@@ -38,6 +38,13 @@ In order to use this crate, you would need to flash the source code for your tar
 * **Hardware:** An ESP development board (ESP32, ESP32-C3, ESP32-C6, or ESP32-S3).
 * **Rust** with ESP target support — full setup guide available [here](https://docs.esp-rs.org/book/installation/index.html).
 * **`espflash`** for flashing and monitoring — installation instructions available [here](https://docs.esp-rs.org/book/tooling/espflash.html). `espflash` also supports `defmt` log decoding out of the box.
+
+## Prebuilt release binaries
+
+Tagged releases (`v*`) publish per-chip `.bin` flash images and a
+[`manifest.json`](docs/RELEASE_MANIFEST.md) for automated host-side flashing.
+See [docs/RELEASE_MANIFEST.md](docs/RELEASE_MANIFEST.md) for the schema and CI
+details.
 
 ## Usage
 
@@ -70,7 +77,7 @@ In order to use this crate, you would need to flash the source code for your tar
     | `esp32`       | Target: ESP32                                                        |
     | `esp32c3`     | Target: ESP32-C3                                                     |
     | `esp32c5`     | Target: ESP32-C5                                                     |
-    | `esp32c6`     | Target: ESP32-C6 (WiFi 6)                                            |
+    | `esp32c6`     | Target: ESP32-C6                                                     |
     | `esp32s3`     | Target: ESP32-S3                                                     |
     | `println`     | Log via `println!` (default)                                         |
     | `defmt`       | Log via `defmt` (efficient binary logging)                           |
@@ -85,27 +92,6 @@ In order to use this crate, you would need to flash the source code for your tar
     cargo build --no-default-features --features "no-std,esp32c6,println,jtag-serial,statistics" \
         --target riscv32imac-unknown-none-elf --release
     ```
-
-    > ⚡ **Most optimal setup → `jtag-serial` + `async-print` + the `serialized`
-    > log mode.** Forcing the JTAG backend gives the highest transport bandwidth;
-    > `jtag-serial` automatically pulls in `async-print` (non-blocking logging,
-    > per `esp-csi-rs` 0.7.0), which keeps heavy log I/O off the collection hot
-    > path and prevents dropped CSI packets under load; and the compact binary
-    > `serialized` output (set at runtime with `set-log-mode --mode=serialized`)
-    > minimizes bytes per packet. Build as in the example above, then run
-    > `set-log-mode --mode=serialized` before `start`. Conversely, never pair
-    > `async-print` with `uart`: UART is already blocking, so the async path only
-    > adds overhead.
-    >
-    > ⚠️ **Do not pair `defmt` with `async-print` (for now).** Both register a
-    > defmt `#[global_logger]`, so building them together fails to link
-    > (`_defmt_acquire` multiply defined) — a known upstream `esp-csi-rs` feature
-    > issue. Because `jtag-serial` forces `async-print`, this also means
-    > **`defmt` + `jtag-serial` does not build**. The build script prints a
-    > warning if you enable both. If you specifically want `defmt` (lowest
-    > transfer overhead), build it *without* async-print via the `*-defmt` aliases
-    > (they use `auto`, which selects the JTAG backend at runtime when a USB host
-    > is present).
 
 3.  **Monitor** (if you used a `-build` alias or a manual `cargo build`): Connect your ESP device over USB and run:
     ```bash
@@ -161,38 +147,56 @@ This is a list of commands available through the CLI interface:
         * `set-log-mode --mode=esp-csi-tool`
 
 * **`set-csi [OPTIONS]`**
-    * Description: Configure CSI feature flags.
+    * Description: Configure CSI feature flags. Each flag is an `on|off` toggle, so a feature can be re-enabled after being turned off (no `reset-config` needed). Accepted values: `on|off`, `true|false`, `1|0`, `enable|disable`, `yes|no`.
     * Options (ESP32, ESP32-C3, ESP32-S3):
-        * `--disable-lltf`: Disable LLTF CSI (default: enabled).
-        * `--disable-htltf`: Disable HTLTF CSI (default: enabled).
-        * `--disable-stbc-htltf`: Disable STBC HTLTF CSI (default: enabled).
-        * `--disable-ltf-merge`: Disable LTF Merge CSI (default: enabled).
+        * `--lltf=<on|off>`: LLTF CSI (default: on).
+        * `--htltf=<on|off>`: HTLTF CSI (default: on).
+        * `--stbc-htltf=<on|off>`: STBC HTLTF CSI (default: on).
+        * `--ltf-merge=<on|off>`: LTF Merge CSI (default: on).
     * Options (ESP32-C5, ESP32-C6):
-        * `--disable-csi`: Disable acquisition of CSI entirely.
-        * `--disable-csi-legacy`: Disable L-LTF acquisition for 11g PPDUs.
-        * `--disable-csi-ht20`: Disable HT-LTF for HT20 PPDUs.
-        * `--disable-csi-ht40`: Disable HT-LTF for HT40 PPDUs.
-        * `--disable-csi-su`: Disable HE-LTF for HE20 SU PPDUs.
-        * `--disable-csi-mu`: Disable HE-LTF for HE20 MU PPDUs.
-        * `--disable-csi-dcm`: Disable HE-LTF for HE20 DCM PPDUs.
-        * `--disable-csi-beamformed`: Disable HE-LTF for HE20 Beamformed PPDUs.
-        * `--csi-he-stbc=<0-2>`: STBC HE LTF selection (default: 2).
+        * `--csi=<on|off>`: Acquisition of CSI, master switch (default: on).
+        * `--csi-legacy=<on|off>`: L-LTF acquisition for 11g PPDUs (default: on).
+        * `--csi-ht20=<on|off>`: HT-LTF for HT20 PPDUs (default: on).
+        * `--csi-ht40=<on|off>`: HT-LTF for HT40 PPDUs (default: on).
         * `--val-scale-cfg=<0-3>`: Value scale configuration (default: 2).
+        * `--preset=<default>`: Apply a CSI acquisition preset.
+        * `--dump-ack=<on|off>`: Dump 802.11 ACK frames (default: on).
+        * `--csi-force-lltf=<on|off>`: Force L-LTF acquisition (ESP32-C5 only).
+        * `--csi-vht=<on|off>`: VHT-LTF for VHT20 PPDUs (ESP32-C5 only).
     * Examples:
-        * `set-csi --disable-lltf --disable-ltf-merge`
-        * `set-csi --disable-csi-legacy --csi-he-stbc=1`
+        * `set-csi --lltf=off --ltf-merge=off`
+        * `set-csi --csi-legacy=off --preset=default`
+        * `set-csi --csi-ht40=on --csi-ht20=off`
 
 * **`set-wifi [OPTIONS]`**
     * Description: Configure WiFi and network settings. **Note:** SSIDs/passwords with spaces should be wrapped in single or double quotes (e.g. `--sta-ssid='My Network'` or `--sta-ssid="My Network"`). Both quote styles are interchangeable. Underscores (`_`) are passed through literally.
     * Options:
-        * `--mode=<station|sniffer|esp-now-central|esp-now-peripheral>`: Specify WiFi operation mode (default: `sniffer`).
+        * `--mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>`: Specify WiFi operation mode (default: `sniffer`).
         * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
         * `--sta-password=<PASSWORD>`: Set the password for Station mode.
-        * `--set-channel=<NUMBER>`: Set the WiFi channel (default: 1).
+        * `--ap-ssid=<SSID>`: Set the SSID for wifi-ap mode (default: `esp-csi-ap`).
+        * `--ap-password=<PASSWORD>`: Set the softAP password (empty = open network).
+        * `--ap-dhcp=<on|off>`: Enable/disable the built-in DHCP server in wifi-ap mode (default: on).
+        * `--ap-leases=<1-8>`: DHCP lease pool size in wifi-ap mode (default: 4). With more than
+          one lease the AP's ICMP flood round-robins across **all** associated stations, so every
+          station captures CSI; `1` restores the legacy single-target flood.
+        * `--ap-burst=<on|off>`: Synchronized burst flood in wifi-ap mode (default: off). Each
+          flood tick sends one unicast frame back-to-back to **every** associated station, so all
+          stations capture their downlink CSI within tens of microseconds of each other
+          (time-aligned multi-receiver capture). Every station sees the full `frequency-hz`, so
+          total offered airtime is `frequency-hz × leases` — lower the rate if the channel
+          saturates. `off` keeps the round-robin flood (rate shared across stations).
+        * `--set-channel=<NUMBER>`: Set the WiFi channel. Use 1–14 on 2.4 GHz; on ESP32-C5
+          use 5 GHz channels such as 149 (default: 1 on most chips,
+          149 on ESP32-C5).
+        * `--peer-mac=<aa:bb:cc:dd:ee:ff>`: ESP-NOW explicit peer MAC (all ESP-NOW modes including fast simplex).
+        * `--ht40=<above|below|none>`: ESP-NOW forced HT40 TX PHY (all ESP-NOW modes including fast simplex).
     * Examples:
         * `set-wifi --mode=sniffer --set-channel=6`
         * `set-wifi --mode=station --sta-ssid="My Network" --sta-password="my password"`
-        * `set-wifi --mode=esp-now-central`
+        * `set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap`
+        * `set-wifi --mode=esp-now-fast-collector --set-channel=6`
+        * `set-wifi --mode=esp-now-fast-source --set-channel=6`
 
 * **`start [OPTIONS]`**
     * Description: Start the CSI collection process. Ensure the device is configured first. Press `q` (or `Q`) on the serial console at any time to stop collection early.
@@ -210,8 +214,8 @@ This is a list of commands available through the CLI interface:
     * Description: Reset all configurations to their default values.
     * Example: `reset-config`
 
-* **`set-rate [OPTIONS]`** *(ESP-NOW only)*
-    * Description: Pin the Wi-Fi PHY rate used by ESP-NOW central / peripheral nodes. Sniffer and station modes ignore this and derive their rate from the surrounding radio configuration.
+* **`set-rate [OPTIONS]`** *(ESP-NOW and fast simplex modes)*
+    * Description: Pin the Wi-Fi PHY rate used by ESP-NOW central / peripheral / fast simplex nodes. Sniffer and station modes ignore this and derive their rate from the surrounding radio configuration.
     * Options:
         * `--rate=<NAME>`: One of `mcs0-lgi` (default), `mcs1-lgi`..`mcs7-lgi`, `mcs0-sgi`, `1m`, `2m`, `5m5`, `11m`, `6m`, `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`.
     * Examples:
@@ -299,11 +303,81 @@ This is a list of commands available through the CLI interface:
     start --duration=60
     ```
 
+6.  **SoftAP lab pair (board A = AP collector, board B = station on same SSID):**
+    ```
+    # Board A (AP collector)
+    set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap
+    set-protocol --protocol=n
+    set-traffic --frequency-hz=4000
+    start
+
+    # Board B (station — match AP SSID/channel)
+    set-wifi --mode=station --sta-ssid=esp-csi-ap --set-channel=6
+    set-protocol --protocol=n
+    set-traffic --frequency-hz=4000
+    start
+    ```
+
+7.  **5 GHz associated AP/STA pair (ESP32-C5 — serialized high-rate CSI):**
+    ```
+    # Board A (AP collector — 5 GHz ch149 on C5)
+    set-wifi --mode=wifi-ap --set-channel=149 --ap-ssid=esp-csi-ap
+    set-protocol --protocol=n
+    set-traffic --frequency-hz=4000
+    start
+
+    # Board B (station RX — record serialized CSI)
+    set-wifi --mode=station --sta-ssid=esp-csi-ap --set-channel=149
+    set-protocol --protocol=n
+    set-log-mode --mode=serialized
+    set-io-tasks --tx=off
+    start
+    ```
+    On ESP32-C5 the station channel doubles as the dual-band hint (2.4 GHz:
+    `--set-channel=6`, 5 GHz: `--set-channel=149`). Disable station TX
+    (`set-io-tasks --tx=off`) so the AP's downlink flood is not competing with a
+    second ICMP generator.
+
+    The pair scales to multiple stations: the AP's DHCP pool holds 4 leases by
+    default (`set-wifi --ap-leases=<1-8>` to change) and the ICMP flood
+    round-robins across all associated stations, so each one captures CSI. Note
+    the offered rate is shared — with N stations each sees roughly
+    `frequency-hz / N` packets per second.
+
+    For **temporally-synchronized** multi-receiver captures, add
+    `set-wifi --ap-burst=on` on the AP: every flood tick then fires one unicast
+    frame back-to-back to each associated station, so all stations sample the
+    channel within tens of microseconds of one another and each sees the full
+    `frequency-hz` rate. (A single broadcast frame cannot be used instead — on
+    an ESP32 softAP broadcast is DTIM-buffered and dropped under load.) Total
+    offered airtime becomes `frequency-hz × N`, so lower
+    `set-traffic --frequency-hz` if the channel saturates.
+
+8.  **ESP-NOW fast simplex (max CSI pps — collector + source on same channel):**
+    ```
+    # Collector board
+    set-wifi --mode=esp-now-fast-collector --set-channel=6
+    start
+
+    # Source board
+    set-wifi --mode=esp-now-fast-source --set-channel=6
+    start
+    ```
+
 ## Important Notes
 
 > 💡 SSIDs and passwords with spaces can be passed as quoted strings to `set-wifi`. Both quote styles work — `--sta-ssid='My WiFi'` and `--sta-ssid="My WiFi"` are equivalent — so you can pick whichever your terminal/keyboard makes easier to type. Underscores (`_`) are passed through literally.
 
+> 🛑 On ESP32-C5, **5 GHz passive sniffer** CSI may return a frozen IQ buffer (driver bug).
+> Use the **AP↔STA pair** (`wifi-ap` + `station`) instead.
+
 > 🛑 To stop a running collection early — including indefinite runs started without `--duration` — press `q` (or `Q`) on the serial console.
+
+> ⚡ **Throughput (high-rate CSI):** `set-log-mode --mode=serialized`,
+> `set-io-tasks --tx=off` on the station board, and `set-traffic --frequency-hz=4000`
+> on the AP. Avoid `set-csi-delivery --mode=callback` during capture
+> (it was the old default and caps output around ~10 Hz). The `q` stop key is polled
+> by the CLI main loop every 5 ms, not in the WiFi callback.
 
 ## Enabling Logging w/ `defmt`
 
@@ -339,7 +413,9 @@ Xtensa targets (`esp32`, `esp32s3`) need the `-Wl,` prefix on the link arg becau
 
 ## Documentation
 
-This CLI is built around the esp-csi-rs crate. You can find full documentation for esp-csi-rs on [docs.rs](https://docs.rs/esp_csi_rs).
+- [`specs/WEBSERVER.md`](specs/WEBSERVER.md) — web-server / host-automation integration (REST mapping, pairing presets, v0.7.0 delta)
+- [`specs/SPECS.md`](specs/SPECS.md) — complete on-device CLI specification
+- [esp-csi-rs on docs.rs](https://docs.rs/esp_csi_rs) — underlying library API
 
 ## Development
 
