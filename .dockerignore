@@ -1,0 +1,14 @@
+# Keep the Docker build context small. The firmware build needs: Cargo.toml/lock,
+# rust-toolchain.toml, build.rs, .cargo/, src/, assets/. Everything below is build output,
+# VCS, editor state, or docs — none of it is needed to compile the firmware.
+target/
+.git/
+.cachebro/
+.claude/
+.cursor/
+.vscode/
+docs/
+specs/
+.github/
+scripts/
+*.md
