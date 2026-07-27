@@ -670,6 +670,9 @@ async fn csi_collection(
                     client_config = client_config
                         .with_password(user_config.sta_password.as_str().to_string());
                 }
+                // The hint pins the C5's radio band, so it has to be the target AP's
+                // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
+                // default therefore makes a 2.4 GHz AP invisible unless overridden.
                 NodeRole::Collector(CollectorMode::Station(
                     WifiStationConfig::new(client_config).with_channel_hint(user_config.channel),
                 ))

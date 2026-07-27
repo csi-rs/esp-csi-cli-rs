@@ -390,6 +390,10 @@ Options:
                                                                 for time-aligned multi-receiver CSI; total airtime =
                                                                 frequency-hz x leases (off = round-robin, rate shared).
   --set-channel=<NUMBER>                                        Set the channel (default: 149 on C5, 1 elsewhere).
+                                                                In station mode this also selects the C5's radio band, so
+                                                                associating to a 2.4 GHz AP needs an explicit 2.4 GHz
+                                                                channel -- the 5 GHz default makes such an AP invisible
+                                                                and reports only 'no access point found'.
   --peer-mac=<aa:bb:cc:dd:ee:ff>                                Emitter modes: destination address of injected frames.
                                                                 Unicasting to a collector's MAC usually raises that
                                                                 collector's CSI rate. Empty value = broadcast (default).
@@ -402,6 +406,7 @@ Examples:
   set-wifi --mode=sniffer
   set-wifi --mode=station --sta-ssid='My WiFi' --sta-password='my pass'
   set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap
+  set-wifi --mode=station --sta-ssid=MyAP --set-channel=6        # C5: pin the 2.4 GHz band
   set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
   set-wifi --mode=ht40-emitter --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
 
