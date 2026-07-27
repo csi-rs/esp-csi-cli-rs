@@ -865,7 +865,7 @@ dependencies = [
 [[package]]
 name = "esp-csi-rs-core"
 version = "0.1.1"
-source = "git+https://github.com/csi-rs/esp-csi-rs-core.git?branch=feat%2Femitter-collector#3cb636ac4f0b37304fcecd046e01ac52c4815fa1"
+source = "git+https://github.com/csi-rs/esp-csi-rs-core.git?branch=feat%2Femitter-collector#5b45272ed0aae47026d6b9f7a10ac144f72e79ff"
 dependencies = [
  "defmt 1.0.1",
  "document-features",
