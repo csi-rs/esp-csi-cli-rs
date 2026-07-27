@@ -1311,6 +1311,24 @@ pub fn cli_info<'a>(
     writeln!(serial, "END-INFO").unwrap();
 }
 
+/// CLI command: `version`
+///
+/// Prints `open <semver>` — the build flavor followed by the crate version.
+///
+/// Host tooling reads the flavor from here rather than probing a
+/// proprietary-only mode string and inspecting the rejection: a positive
+/// statement survives mode renames, and the proprietary build answers
+/// `pro <semver>` from the same command.
+pub fn version_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    _item: &Item<SerialInterface, Context>,
+    _args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    writeln!(serial, "open {}", env!("CARGO_PKG_VERSION")).unwrap();
+}
+
 /// CLI command: `restart`
 ///
 /// Requests a software reset of the chip. The reset is NOT performed inline:

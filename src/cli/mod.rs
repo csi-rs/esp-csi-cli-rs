@@ -10,7 +10,7 @@ use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
     cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_output,
     set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic, set_wifi,
-    show_config, start_csi_collect,
+    show_config, start_csi_collect, version_cmd,
 };
 pub use crate::cli::serial::SerialInterface;
 // `is_jtag` is only compiled under `auto` (see serial.rs); match that gating
@@ -501,6 +501,26 @@ Output format:
   of the welcome banner on every reset, so a host can identify the
   firmware passively without sending this command. The `protocol` field
   bumps on any breaking change to this grammar."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: version_cmd,
+                parameters: &[],
+            },
+            command: "version",
+            help: Some("version - Print the build flavor and firmware version.
+
+Usage:
+  version
+
+Output:
+  open <semver>
+
+Description:
+  One line: the build flavor (`open` for this build, `pro` for the proprietary
+  firmware) followed by the crate version. Host tooling detects the flavor from
+  this positive statement instead of probing a proprietary-only mode string and
+  reading the rejection, so mode renames cannot break the detection."),
         },
         &Item {
             item_type: ItemType::Callback {

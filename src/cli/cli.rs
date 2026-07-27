@@ -48,6 +48,7 @@ pub fn enter_root(
     show-stats              Print runtime CSI / traffic counters (statistics feature).
     reset-config            Reset all configurations to their default values.
     restart                 Reboot the device via a clean software reset.
+    version                 Print the build flavor and firmware version.
     info                    Print firmware identification metadata.
     help                    Display this help menu or details for a specific command.
 
