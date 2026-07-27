@@ -587,6 +587,20 @@ pub fn set_wifi<'a>(
         }
     }
 
+    // Which interface an emitter injects on. The driver accepts raw TX on both,
+    // but only one may actually radiate on a given chip.
+    if let Ok(Some(v)) = argument_finder(item, args, "emitter-iface") {
+        match v.to_ascii_lowercase().as_str() {
+            "sta" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().emitter_use_sta_if = true;
+            }),
+            "ap" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().emitter_use_sta_if = false;
+            }),
+            _ => writeln!(serial, "Invalid --emitter-iface '{}' (use sta|ap)", v).unwrap(),
+        }
+    }
+
     writeln!(serial, "\nUpdated WiFi Configuration:\n").unwrap();
     USER_CONFIG.lock(|config| {
         writeln!(

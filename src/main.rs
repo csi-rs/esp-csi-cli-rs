@@ -689,6 +689,9 @@ async fn csi_collection(
                 if let Some(mac) = user_config.peer_mac {
                     emitter = emitter.with_dst_mac(mac);
                 }
+                if !user_config.emitter_use_sta_if {
+                    emitter = emitter.with_ap_interface();
+                }
                 NodeRole::Emitter(emitter)
             }
         };

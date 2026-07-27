@@ -127,6 +127,10 @@ pub struct UserConfig {
     /// Default `20` ms ≈ 50 frames/s. Set via
     /// `set-wifi --inject-period-ms=<ms>`.
     pub inject_period_ms: u32,
+    /// Interface an emitter injects on: `true` = STA, `false` = AP. Raw injection
+    /// is accepted on either, but which one actually radiates is chip-dependent,
+    /// so this is exposed rather than hard-coded.
+    pub emitter_use_sta_if: bool,
 }
 
 impl core::fmt::Debug for UserConfig {
@@ -157,6 +161,7 @@ impl core::fmt::Debug for UserConfig {
             .field("ht40_secondary", &ht40_str)
             .field("delivery_raw", &self.delivery_raw)
             .field("inject_period_ms", &self.inject_period_ms)
+            .field("emitter_use_sta_if", &self.emitter_use_sta_if)
             .finish()
     }
 }
@@ -209,6 +214,7 @@ impl UserConfig {
             ht40_secondary: None,
             delivery_raw: false,
             inject_period_ms: 20,
+            emitter_use_sta_if: true,
         }
     }
 }
