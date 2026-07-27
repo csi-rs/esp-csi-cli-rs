@@ -113,6 +113,16 @@ esp-csi-rs = { version = "0.9", default-features = false }
 menu = { version = "0.6.1", default-features = false }
 embedded-io = "0.6.1"
 
+# The emitter/collector role API (`NodeRole`, `EmitterConfig`,
+# `set_csi_output_enabled`) is not published yet, so both crates resolve to the
+# `feat/emitter-collector` branches. `esp-csi-rs-core` must be patched as well:
+# `esp-csi-rs` depends on it by version, and an unpatched 0.1.1 from crates.io
+# would still carry the old central/peripheral API. Remove both lines once the
+# two crates are released.
+[patch.crates-io]
+esp-csi-rs = { git = "https://github.com/csi-rs/esp-csi-rs.git", branch = "feat/emitter-collector" }
+esp-csi-rs-core = { git = "https://github.com/csi-rs/esp-csi-rs-core.git", branch = "feat/emitter-collector" }
+
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization

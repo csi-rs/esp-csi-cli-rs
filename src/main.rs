@@ -55,10 +55,9 @@ use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CSINodeHardware, CentralOpMode, CollectionMode, CsiDeliveryMode,
-    EspNowConfig, Node, PeripheralOpMode, WifiApConfig, WifiSnifferConfig, WifiStationConfig,
-    clear_csi_callback, set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
-    set_raw_listen,
+    CSINode, CSINodeClient, CollectorMode, CsiDeliveryMode, EmitterConfig, HtBandwidth,
+    NodeHardware, NodeRole, WifiApConfig, WifiSnifferConfig, WifiStationConfig, clear_csi_callback,
+    set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -178,35 +177,6 @@ fn jtag_peek_for_stop() -> bool {
 /// data is delivered or logged; stop relies on duration / reset / main-loop `q`.
 fn raw_csi_noop() {}
 
-/// Build the [`EspNowConfig`] for an ESP-NOW run from the user config snapshot.
-///
-/// `with_peer_mac` switches off automatic magic-prefix pairing for explicit
-/// per-node peer filtering; `with_ht40` forces the per-peer TX PHY to HT40.
-/// Both are only applied when the user configured them.
-fn build_espnow_config(user_config: &UserConfig) -> EspNowConfig {
-    let mut cfg = EspNowConfig::default()
-        .with_channel(user_config.channel)
-        .with_phy_rate(user_config.phy_rate);
-    if let Some(mac) = user_config.peer_mac {
-        cfg = cfg.with_peer_mac(mac);
-    }
-    if let Some(secondary) = user_config.ht40_secondary {
-        cfg = cfg.with_ht40(secondary);
-    }
-    cfg
-}
-
-fn build_espnow_fast_config(user_config: &UserConfig) -> EspNowConfig {
-    let mut cfg = EspNowConfig::fast_default().with_channel(user_config.channel);
-    if let Some(mac) = user_config.peer_mac {
-        cfg = cfg.with_peer_mac(mac);
-    }
-    if let Some(secondary) = user_config.ht40_secondary {
-        cfg = cfg.with_ht40(secondary);
-    }
-    cfg
-}
-
 fn build_wifi_ap_config(user_config: &UserConfig) -> WifiApConfig {
     let auth = if user_config.ap_password.is_empty() {
         AuthenticationMethod::None
@@ -262,14 +232,12 @@ enum NodeMode {
     WifiStation,
     /// Self-contained softAP CSI collector (DHCP + ICMP flood).
     WifiAccessPoint,
-    /// Acts as the central (initiating) device in an ESP-NOW pair.
-    EspNowCentral,
-    /// Acts as the peripheral (responding) device in an ESP-NOW pair.
-    EspNowPeripheral,
-    /// Asymmetric ESP-NOW simplex collector (sparse beacon, then RX-only).
-    EspNowFastCollector,
-    /// Asymmetric ESP-NOW simplex source (unicast flood at forced PHY).
-    EspNowFastSource,
+    /// Forced-HT20 emitter: unassociated STA loop-injecting 20 MHz 802.11n
+    /// PPDUs. TX only, never captures CSI.
+    Ht20Emitter,
+    /// Forced-HT40 emitter: 40 MHz bonded 802.11n PPDUs (secondary above the
+    /// primary) on an unassociated STA. TX only.
+    Ht40Emitter,
 }
 
 /// esp-backtrace `custom-halt` hook: called after the panic message and
@@ -681,12 +649,12 @@ async fn csi_collection(
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
 
-        // Map NodeMode → esp-csi-rs Node + operation mode. The configured
-        // channel and PHY rate flow through the per-mode builders so a user
-        // who sets `set-wifi --set-channel=6` then `start`s gets channel 6
-        // applied even though set_channel is not called on the running node.
-        let node_kind = match user_config.node_mode {
-            NodeMode::WifiSniffer => Node::Peripheral(PeripheralOpMode::WifiSniffer(
+        // Map NodeMode → a node role. The configured channel and the per-mode
+        // builders flow through here so a user who sets
+        // `set-wifi --set-channel=6` then `start`s gets channel 6 applied even
+        // though set_channel is not called on the running node.
+        let role = match user_config.node_mode {
+            NodeMode::WifiSniffer => NodeRole::Collector(CollectorMode::Sniffer(
                 WifiSnifferConfig::default().with_channel(user_config.channel),
             )),
             NodeMode::WifiStation => {
@@ -702,34 +670,33 @@ async fn csi_collection(
                     client_config = client_config
                         .with_password(user_config.sta_password.as_str().to_string());
                 }
-                Node::Central(CentralOpMode::WifiStation(
+                NodeRole::Collector(CollectorMode::Station(
                     WifiStationConfig::new(client_config).with_channel_hint(user_config.channel),
                 ))
             }
-            NodeMode::WifiAccessPoint => Node::Central(CentralOpMode::WifiAccessPoint(
+            NodeMode::WifiAccessPoint => NodeRole::Collector(CollectorMode::AccessPoint(
                 build_wifi_ap_config(&user_config),
             )),
-            NodeMode::EspNowCentral => {
-                Node::Central(CentralOpMode::EspNow(build_espnow_config(&user_config)))
+            NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
+                let bandwidth = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
+                    HtBandwidth::Ht40Above
+                } else {
+                    HtBandwidth::Ht20
+                };
+                // `--peer-mac` doubles as the injection destination (default broadcast).
+                let mut emitter = EmitterConfig::new(user_config.channel, bandwidth)
+                    .with_period(Duration::from_millis(user_config.inject_period_ms as u64));
+                if let Some(mac) = user_config.peer_mac {
+                    emitter = emitter.with_dst_mac(mac);
+                }
+                NodeRole::Emitter(emitter)
             }
-            NodeMode::EspNowPeripheral => {
-                Node::Peripheral(PeripheralOpMode::EspNow(build_espnow_config(&user_config)))
-            }
-            NodeMode::EspNowFastCollector => Node::Central(CentralOpMode::EspNowFastCollector(
-                build_espnow_fast_config(&user_config),
-            )),
-            NodeMode::EspNowFastSource => Node::Peripheral(PeripheralOpMode::EspNowFastSource(
-                build_espnow_fast_config(&user_config),
-            )),
         };
 
         // Throughput-oriented modes disable Wi-Fi power saving (matches esp-csi-rs examples).
         if matches!(
             user_config.node_mode,
-            NodeMode::WifiAccessPoint
-                | NodeMode::WifiStation
-                | NodeMode::EspNowFastCollector
-                | NodeMode::EspNowFastSource
+            NodeMode::WifiAccessPoint | NodeMode::WifiStation
         ) {
             let _ = controller.set_power_saving(PowerSaveMode::None);
         }
@@ -742,20 +709,16 @@ async fn csi_collection(
         };
 
         // Build hardware handle and construct the CSI node
-        let hardware = CSINodeHardware::new(&mut interfaces, controller);
-        let mut node = CSINode::new(
-            node_kind,
-            user_config.collection_mode,
-            Some(user_config.csi_config),
-            traffic_freq,
-            hardware,
-        );
+        let hardware = NodeHardware::new(&mut interfaces, controller);
+        let mut node = CSINode::new(role, Some(user_config.csi_config), traffic_freq, hardware);
+        // CSI delivery gate: `false` keeps capture (and its timing) running but
+        // decodes/logs nothing. No effect on an emitter, which captures nothing.
+        node.set_csi_output_enabled(user_config.csi_output_enabled);
         // Apply IO task configuration (TX/RX direction toggles).
         // `set-traffic --frequency-hz=0` must mean NO generated traffic: with
         // TX left on, esp-csi-rs falls back to a default flood rate when the
         // frequency is None (100 Hz station / 1000 Hz AP). Restricted to the
-        // WiFi infra modes — ESP-NOW modes use the TX task for their own
-        // transmissions, not the ICMP flood.
+        // WiFi infra modes — an emitter's inject loop is not the ICMP flood.
         let mut io_tasks = user_config.io_tasks;
         if user_config.trigger_freq == 0
             && matches!(
@@ -771,12 +734,9 @@ async fn csi_collection(
         node.set_flood_unsolicited_reply(user_config.flood_unsolicited);
 
         // Apply the user-selected Wi-Fi PHY protocol (set via `set-protocol`).
-        // ESP-NOW / sniffer modes additionally pin the PHY rate; station mode
-        // derives its rate from the associated AP, so `set_rate` is a no-op there.
+        // Ignored for an emitter, which pins its own protocol set to match the
+        // forced TX PHY during bring-up.
         node.set_protocol(user_config.protocol);
-        if !matches!(user_config.node_mode, NodeMode::WifiStation) {
-            node.set_rate(user_config.phy_rate);
-        }
 
         // Watcher that translates a CLI STOP_REQUEST into esp-csi-rs's internal
         // STOP_SIGNAL via the public CSINodeClient::send_stop API. After signaling
@@ -799,14 +759,9 @@ async fn csi_collection(
         set_csi_delivery_mode(CsiDeliveryMode::Off);
         if user_config.delivery_raw {
             set_csi_logging_enabled(false);
-            set_raw_listen(true);
             set_csi_raw_callback(raw_csi_noop);
         } else {
-            set_raw_listen(false);
-            match user_config.collection_mode {
-                CollectionMode::Collector => set_csi_logging_enabled(true),
-                CollectionMode::Listener => set_csi_logging_enabled(false),
-            }
+            set_csi_logging_enabled(user_config.csi_output_enabled);
         }
 
         // Run for a fixed duration or indefinitely. In both arms run_duration/run

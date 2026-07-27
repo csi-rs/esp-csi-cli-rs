@@ -8,7 +8,7 @@ use menu::{Item, ItemType, Menu, Parameter};
 #[cfg(feature = "statistics")]
 use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
-    cli_info, reset_config, restart_cmd, set_collection_mode, set_csi, set_csi_delivery_cmd,
+    cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_output,
     set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic, set_wifi,
     show_config, start_csi_collect,
 };
@@ -95,28 +95,35 @@ Description:
         },
         &Item {
             item_type: ItemType::Callback {
-                function: set_collection_mode,
+                function: set_csi_output,
                 parameters: &[
                     Parameter::NamedValue {
-                        parameter_name: "mode",
-                        argument_name: "mode",
-                        help: Some("Collection mode: 'collector' or 'listener'"),
+                        parameter_name: "enabled",
+                        argument_name: "enabled",
+                        help: Some("Deliver captured CSI off-device: true|false"),
                     },
                 ],
             },
-            command: "set-collection-mode",
-            help: Some("set-collection-mode - Set the CSI node collection mode.
+            command: "set-csi-output",
+            help: Some("set-csi-output - Toggle off-device delivery of captured CSI.
 
 Usage:
-  set-collection-mode --mode=<collector|listener>
+  set-csi-output --enabled=<true|false>
 
 Options:
-  --mode=collector    Act as the node that generates and collects CSI data (default).
-  --mode=listener     Act as a passive listener that only receives CSI data.
+  --enabled=true      Deliver captured CSI over the serial transport (default).
+  --enabled=false     Keep capturing but decode/log nothing.
 
 Examples:
-  set-collection-mode --mode=collector
-  set-collection-mode --mode=listener"),
+  set-csi-output --enabled=true
+  set-csi-output --enabled=false
+
+Description:
+  Maps to CSINode::set_csi_output_enabled. With delivery off the radio still
+  captures CSI, so the RX path and its timing are unchanged — nothing is
+  decoded, logged, or handed to a callback. Use it for a node whose only job is
+  to keep traffic on air, or to measure capture cost without delivery cost.
+  An emitter captures nothing, so the setting has no effect there."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -339,12 +346,17 @@ configurations on or off."),
                     Parameter::NamedValue {
                         parameter_name: "peer-mac",
                         argument_name: "peermac",
-                        help: Some("ESP-NOW explicit peer MAC (aa:bb:cc:dd:ee:ff); empty clears"),
+                        help: Some("Emitter destination MAC (aa:bb:cc:dd:ee:ff); empty = broadcast"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "ht40",
                         argument_name: "ht40",
-                        help: Some("ESP-NOW forced HT40 TX PHY: above|below|none"),
+                        help: Some("softAP secondary channel: above|below|none"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "inject-period-ms",
+                        argument_name: "injectperiodms",
+                        help: Some("Emitter inter-frame period in ms (default 20)"),
                     },
                 ],
             },
@@ -359,8 +371,7 @@ quotes, e.g. --sta-ssid='My WiFi' --sta-password=\"my pass\". Both quote styles
 are accepted. Underscores are passed through as literal `_`.
 
 Options:
-  --mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>
-                                                                Specify WiFi operation mode (default: sniffer).
+  --mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter>    Specify WiFi operation mode (default: sniffer).
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
   --ap-ssid=<SSID>                                              Set the SSID for wifi-ap mode (default: esp-csi-ap).
@@ -374,30 +385,34 @@ Options:
                                                                 for time-aligned multi-receiver CSI; total airtime =
                                                                 frequency-hz x leases (off = round-robin, rate shared).
   --set-channel=<NUMBER>                                        Set the channel (default: 149 on C5, 1 elsewhere).
-  --peer-mac=<aa:bb:cc:dd:ee:ff>                                ESP-NOW: explicit peer MAC. Switches off automatic
-                                                                magic-prefix pairing for per-node source-MAC filtering.
-                                                                Pass an empty value to clear (back to auto pairing).
-  --ht40=<above|below|none>                                     ESP-NOW: force the per-peer TX PHY to HT40 with the
-                                                                given secondary channel (default: none = HT20/legacy).
+  --peer-mac=<aa:bb:cc:dd:ee:ff>                                Emitter modes: destination address of injected frames.
+                                                                Unicasting to a collector's MAC usually raises that
+                                                                collector's CSI rate. Empty value = broadcast (default).
+  --ht40=<above|below|none>                                     wifi-ap: run the softAP as HT40 with the given secondary
+                                                                channel (default: none = HT20).
+  --inject-period-ms=<NUMBER>                                   Emitter modes: delay between injected frames in ms
+                                                                (default: 20 ~= 50 frames/s).
 
 Examples:
   set-wifi --mode=sniffer
   set-wifi --mode=station --sta-ssid='My WiFi' --sta-password='my pass'
   set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap
-  set-wifi --mode=esp-now-central --peer-mac=aa:bb:cc:dd:ee:ff --ht40=above
-  set-wifi --mode=esp-now-fast-collector --set-channel=6
-  set-wifi --mode=esp-now-fast-source --set-channel=6
+  set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
+  set-wifi --mode=ht40-emitter --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
-  - Modes:
-      - `station`: Connect to an existing WiFi network.
-      - `sniffer`: Monitor WiFi traffic passively.
+  A node either EMITS (puts known RF energy on the channel, never captures) or
+  COLLECTS (captures the channel response); the collector modes differ only in
+  how they obtain frames to measure.
+  - Collector modes:
+      - `station`: Connect to an existing WiFi network and measure its downlink.
+      - `sniffer`: Lock a channel promiscuously and measure every frame overheard.
+        This is the mode that pairs with an emitter.
       - `wifi-ap`: Self-contained softAP CSI collector (pair with `station` on same SSID).
-      - `esp-now-central`: Act as a central device in ESP-NOW communication.
-      - `esp-now-peripheral`: Act as a peripheral device in ESP-NOW communication.
-      - `esp-now-fast-collector` / `esp-now-fast-source`: Asymmetric ESP-NOW simplex for max CSI pps.
-  - ESP-NOW options (`--peer-mac`, `--ht40`) apply to all ESP-NOW modes including fast simplex.
+  - Emitter modes (TX only, no association; use `--set-channel`, `--peer-mac`
+    and `--inject-period-ms`):
+      - `ht20-emitter` / `ht40-emitter`: 802.11n HT PPDUs, 20 or 40 MHz. All chips.
   - For AP + STA lab pairs, use `set-protocol --protocol=n` and consider `set-traffic --frequency-hz=4000`."),
         },
         &Item {
@@ -450,10 +465,10 @@ Usage:
 Description:
   Prints a summary of every persisted setting:
   - WiFi: mode, channel, station SSID/password, softAP SSID/password/DHCP.
-  - Collection: collector/listener role, traffic frequency, PHY rate, TX/RX
-    task toggles.
+  - Collection: CSI output gate, traffic frequency, PHY rate, TX/RX task
+    toggles, emitter inter-frame period.
   - CSI Config: chip-specific feature flags (LLTF/HTLTF on classic chips,
-    HE/STBC fields on ESP32-C5/C6).
+    per-PPDU-format acquisition flags on ESP32-C5/C6).
 
   Use this before `start` to verify the configuration that the next collection
   run will snapshot."),
@@ -526,7 +541,7 @@ Usage:
 Description:
   Re-initializes the runtime UserConfig with built-in defaults:
   - WiFi mode: Sniffer, channel 1, no station SSID/password.
-  - Collection: Collector, traffic frequency 100 Hz.
+  - Collection: CSI output enabled, traffic frequency 100 Hz.
   - PHY rate: MCS0-LGI; IO tasks: TX + RX both enabled.
   - CSI feature flags: chip default (all enabled / max-detail).
 
@@ -544,7 +559,7 @@ Description:
                 ],
             },
             command: "set-rate",
-            help: Some("set-rate - Set the Wi-Fi PHY rate (ESP-NOW modes only).
+            help: Some("set-rate - Record the Wi-Fi PHY rate (reporting only).
 
 Usage:
   set-rate --rate=<rate>
@@ -558,9 +573,9 @@ Examples:
   set-rate --rate=24m
 
 Description:
-  Selects the Wi-Fi PHY rate used by ESP-NOW central / peripheral nodes.
-  Sniffer and station modes derive their rate from the surrounding radio
-  configuration and ignore this setting."),
+  Stored in the config and echoed by show-config, but no mode applies it:
+  collector modes derive their rate from the surrounding radio configuration,
+  and an emitter transmits at the rate its forced TX PHY implies."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -583,13 +598,13 @@ Options:
   --protocol=<NAME>   One of: b, g, n, lr (default), a, ac.
 
 Examples:
-  set-protocol --protocol=lr     # ESP-to-ESP long range (sniffer / ESP-NOW)
+  set-protocol --protocol=lr     # ESP-to-ESP long range (sniffer)
   set-protocol --protocol=n      # 802.11n, e.g. station mode against an AP
 
 Description:
   Applied to the node via CSINode::set_protocol at the start of each
-  collection run. Previously this was hardcoded per WiFi mode (LR for
-  sniffer/ESP-NOW, N for station); it is now an explicit setting.
+  collection run. Ignored by the emitter modes, which pin their own protocol
+  set to match the forced TX PHY.
 
   Pick the protocol to match your link: LR for maximum range between ESP
   devices, N when associating to a standard AP in station mode. Not every
@@ -619,14 +634,15 @@ Usage:
   set-io-tasks [--tx=<on|off>] [--rx=<on|off>]
 
 Examples:
-  set-io-tasks --tx=off          # listener-only node
+  set-io-tasks --tx=off          # receive-only node
   set-io-tasks --tx=on --rx=on   # bidirectional (default)
 
 Description:
   Mirrors `IOTaskConfig` in esp-csi-rs. Disabling RX turns the node into a
   pure transmitter (skips the WiFi-callback CSI path); disabling TX turns
   it into a pure receiver (no traffic generation). Both omitted leaves the
-  current state untouched."),
+  current state untouched. To stop CSI *delivery* while leaving the RX path
+  and its timing intact, use `set-csi-output --enabled=false` instead."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -658,7 +674,7 @@ Options:
   --mode=raw        Zero-copy CPU-benchmark fast-path: the WiFi callback returns
                     before building the CSIDataPacket, so no CSI data is
                     delivered or logged. Applies on the next `start` (no q-key
-                    stop), and also skips ESP-NOW control-packet ingest.
+                    stop).
   --logging=on/off  Toggle the per-packet UART/JTAG `log_csi` gate
                     independently of delivery mode.
 
@@ -692,7 +708,6 @@ Description:
   - RX/TX PPS averages
   - RX/TX rate in Hz
   - RX dropped packets
-  - ESP-NOW TX queued / confirmed / failed counts
 
   Counters reset on the start of each new `start` collection."),
         },

@@ -833,8 +833,7 @@ dependencies = [
 [[package]]
 name = "esp-csi-rs"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd6816b359597fb976bb172db8e415fae3a56e1d3ca1ee4a134939560a962602"
+source = "git+https://github.com/csi-rs/esp-csi-rs.git?branch=feat%2Femitter-collector#2fe23610fb89fb8677cd7495815c4393c12d37c3"
 dependencies = [
  "defmt 1.0.1",
  "document-features",
@@ -866,8 +865,7 @@ dependencies = [
 [[package]]
 name = "esp-csi-rs-core"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fb4d04c5eb98f5b7427d217ad9e282c1af3a3f6a5e83508b7fd1678a1e6015a"
+source = "git+https://github.com/csi-rs/esp-csi-rs-core.git?branch=feat%2Femitter-collector#3cb636ac4f0b37304fcecd046e01ac52c4815fa1"
 dependencies = [
  "defmt 1.0.1",
  "document-features",
