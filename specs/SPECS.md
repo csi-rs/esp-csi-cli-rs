@@ -58,8 +58,14 @@ On a `START_SIGNAL` the task (`src/main.rs:562`):
    - `WifiStation` → `Collector(Station { ssid, password, WPA2-Personal })`
    - `WifiAccessPoint` → `Collector(AccessPoint(WifiApConfig { ap, channel, ht40, dhcp }))`
    - `Ht20Emitter` / `Ht40Emitter` → `Emitter(EmitterConfig { channel, Ht20|Ht40Above,
-     period = inject_period_ms [, dst_mac = peer_mac] })`
-3. For `WifiAccessPoint` and `WifiStation`, calls
+     period = inject_period_ms [, dst_mac = peer_mac] [, ap_interface] })`
+   - `EspNowCentral` → `Central(EspNow(EspNowConfig { channel, phy_rate [, peer_mac] [, ht40] }))`
+   - `EspNowPeripheral` → `Peripheral(EspNow(...))`, same config builder
+   - `EspNowFastCollector` → `Central(EspNowFastCollector(EspNowConfig::fast_default()
+     { channel [, peer_mac] [, ht40] }))`
+   - `EspNowFastSource` → `Peripheral(EspNowFastSource(...))`, same fast builder
+3. For `WifiAccessPoint`, `WifiStation`, `EspNowFastCollector` and
+   `EspNowFastSource`, calls
    `controller.set_power_saving(PowerSaveMode::None)`.
 4. Computes traffic frequency: `trigger_freq == 0` → `None` (traffic generator
    off); otherwise `Some(trigger_freq as u16)` (note the `u64 → u16` cast —
@@ -67,7 +73,7 @@ On a `START_SIGNAL` the task (`src/main.rs:562`):
 5. Constructs `CSINode::new(...)`, applies
    `set_csi_output_enabled(csi_output_enabled)` and `set_io_tasks(io_tasks)`.
 6. Applies `node.set_protocol(user_config.protocol)` (set via `set-protocol`;
-   default `LR`). An emitter ignores it — it pins its own protocol set to match
+   default `LR`).
    the forced TX PHY. `phy_rate` is no longer applied by any mode.
 7. Registers the CSI delivery path for the run:
    - If `delivery_raw` (`set-csi-delivery --mode=raw`): `set_csi_logging_enabled(false)`
@@ -184,7 +190,7 @@ CSI Output: true
   `CSINode::set_csi_output_enabled` and `set_csi_logging_enabled`.
 - With delivery off the radio still captures CSI — RX path and timing unchanged
   — but nothing is decoded, logged, or handed to a callback. No effect on an
-  emitter, which captures nothing.
+  node.
 - Accepts the shared on/off vocabulary (`true|false`, `on|off`, `1|0`,
   `enable[d]|disable[d]`, `yes|no`).
 - Unrecognized value prints `Invalid --enabled value. Use 'true' or 'false'.`
@@ -291,16 +297,17 @@ WiFi / radio operating parameters.
 
 | Argument                    | Values                                                                                              | Default   |
 |-----------------------------|-----------------------------------------------------------------------------------------------------|-----------|
-| `--mode=<m>`                | `station` \| `sniffer` \| `wifi-ap` \| `ht20-emitter` \| `ht40-emitter`                             | `sniffer` |
+| `--mode=<m>`                | `station` \| `sniffer` \| `wifi-ap` \| `ht20-emitter` \| `ht40-emitter` \| `esp-now-central` \| `esp-now-peripheral` \| `esp-now-fast-collector` \| `esp-now-fast-source` | `sniffer` |
 | `--sta-ssid=<SSID>`         | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | empty     |
 | `--sta-password=<PASSWORD>` | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | empty     |
 | `--ap-ssid=<SSID>`          | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | `esp-csi-ap` |
 | `--ap-password=<PASSWORD>`  | UTF-8, ≤ 32 bytes; quoting allowed; empty = open AP                                                 | empty     |
 | `--ap-dhcp=<on\|off>`       | `on`/`off`/`true`/`false`/`1`/`0`/`yes`/`no`                                                        | `on`      |
 | `--set-channel=<N>`         | `u8`; valid WiFi channels 1–14                                                                      | `1`       |
-| `--peer-mac=<MAC>`          | Emitter destination address: `aa:bb:cc:dd:ee:ff` or `aa-bb-...` (case-insensitive); empty clears  | broadcast |
-| `--ht40=<above\|below\|none>` | softAP secondary channel; `none`/`off` clears                                                     | none (HT20) |
+| `--peer-mac=<MAC>`          | Emitter dst addr / explicit ESP-NOW peer: `aa:bb:cc:dd:ee:ff` or `aa-bb-...`; empty clears        | broadcast / auto |
+| `--ht40=<above\|below\|none>` | softAP secondary channel, or ESP-NOW per-peer HT40 TX PHY; `none`/`off` clears                    | none (HT20) |
 | `--inject-period-ms=<MS>`   | Emitter inter-frame period, positive integer                                                      | `20`      |
+| `--emitter-iface=<sta\|ap>` | Emitter injection interface                                                                       | `sta`     |
 
 **Output** (reprints the resulting WiFi config):
 ```
@@ -313,20 +320,23 @@ Station WiFi Settings:
 SSID: '', Password: ''
 Access Point Settings:
 SSID: 'esp-csi-ap', Password: (open), DHCP: true
-Emitter Destination MAC: broadcast
-softAP Secondary Channel: HT20/legacy
+Peer MAC: unset (emitter broadcasts / ESP-NOW auto-pairs)
+Secondary Channel: HT20/legacy
 Emitter Period: 20ms
 ```
 
 **Behavior / inferences:**
 - Mode → `NodeMode`: `station`→`WifiStation`, `sniffer`→`WifiSniffer`,
   `wifi-ap`→`WifiAccessPoint`, `ht20-emitter`→`Ht20Emitter`,
-  `ht40-emitter`→`Ht40Emitter`. Unknown mode prints `Invalid WiFi Mode`; field
+  `ht40-emitter`→`Ht40Emitter`, `esp-now-central`→`EspNowCentral`,
+  `esp-now-peripheral`→`EspNowPeripheral`,
+  `esp-now-fast-collector`→`EspNowFastCollector`,
+  `esp-now-fast-source`→`EspNowFastSource`. Unknown mode prints `Invalid WiFi Mode`; field
   unchanged. There are no legacy aliases — the removed `esp-now-*` strings are
   rejected like any other unknown mode.
 - Channel parsed as `u8`; non-numeric prints `Invalid Max Connections`
   (misnamed). Out-of-range (>14) is accepted by the parser but rejected by the
-  radio at `start`. Channel flows to sniffer, AP, and the emitter modes;
+  radio at `start`. Channel flows to sniffer, AP, the emitters, and the ESP-NOW modes;
   `WifiStation` derives its channel from the associated AP.
 - `--sta-ssid` / `--sta-password` / `--ap-ssid` / `--ap-password` are stored in
   `heapless::String<32>`. **A value longer than 32 bytes panics** (`unwrap` on
@@ -340,13 +350,15 @@ Emitter Period: 20ms
 - `--peer-mac`: the destination address of injected frames. Unicasting to a
   collector usually raises that collector's CSI rate. An **empty** value resets
   to `None` (broadcast). A malformed MAC prints
-  `Invalid --peer-mac (use aa:bb:cc:dd:ee:ff)`. Emitter modes only.
+  `Invalid --peer-mac (use aa:bb:cc:dd:ee:ff)`. Emitter and ESP-NOW modes only.
 - `--ht40`: `above`/`below` run the `wifi-ap` softAP as HT40 with that secondary
   channel; `none`/`off` reverts to HT20. Any other value prints
-  `Invalid --ht40 (use above|below|none)`. It does **not** select emitter
-  bandwidth — use `--mode=ht40-emitter` for that.
+  `Invalid --ht40 (use above|below|none)`. In `wifi-ap` it is the softAP's
+  secondary channel; in the ESP-NOW modes it forces the per-peer TX PHY to HT40.
+  It does **not** select emitter bandwidth — use `--mode=ht40-emitter` for that.
 - `--inject-period-ms`: emitter inter-frame delay; must be a positive integer,
   otherwise `Invalid --inject-period-ms (use a positive integer)`.
+- `--emitter-iface`: `sta`|`ap`, otherwise `Invalid --emitter-iface '<v>' (use sta|ap)`.
 
 ---
 
@@ -452,7 +464,7 @@ Restores **every** field to its compiled-in default (§4).
 
 Record the Wi-Fi PHY rate. **Nothing applies it** since the ESP-NOW transport was
 removed: collectors derive their rate from the surrounding radio configuration
-and an emitter transmits at the rate its forced TX PHY implies. Kept because
+The `esp-now-central` / `esp-now-peripheral` pair DOES apply it as the per-peer TX PHY. Kept because
 `show-config` still reports it.
 
 | Argument     | Values | Default |
@@ -483,7 +495,6 @@ Set the Wi-Fi PHY protocol applied via `CSINode::set_protocol` at each `start`.
 
 **Behavior:**
 - Stored in `UserConfig.protocol`; snapshotted at `start`. Ignored by the
-  emitter modes, which pin their own protocol set to match the forced TX PHY.
 - `lr` suits sniffer links between ESP devices.
 - Use `n` for station mode against a standard AP and
   for AP + STA lab pairs (`wifi-ap` + `station`).
@@ -651,18 +662,18 @@ reset fires; the firmware then reboots and re-emits the welcome banner.
 
 ### 3.1 Mode-dependent applicability
 
-| Setting              | `WifiSniffer` | `WifiStation` | `WifiAccessPoint` | `Ht20Emitter` / `Ht40Emitter` |
+| Setting              | `WifiSniffer` | `WifiStation` | `WifiAccessPoint` | `Ht20/Ht40Emitter` | `EspNow*` |
 |----------------------|:-------------:|:-------------:|:-----------------:|:-----------------------------:|
-| `--set-channel`      | ✅            | ❌ (from AP)  | ✅                | ✅                            |
-| `--sta-ssid/pwd`     | ❌            | ✅            | ❌                | ❌                            |
-| `--ap-ssid/pwd/dhcp` | ❌            | ❌            | ✅                | ❌                            |
-| `--peer-mac`         | ❌            | ❌            | ❌                | ✅ (dst addr)                 |
-| `--ht40`             | ❌            | ❌            | ✅ (AP secondary) | ❌ (use `ht40-emitter`)       |
-| `--inject-period-ms` | ❌            | ❌            | ❌                | ✅                            |
-| `set-csi-output`     | ✅            | ✅            | ✅                | ❌ (no capture)               |
-| `set-rate`           | ❌ (no-op)    | ❌ (no-op)    | ❌ (no-op)        | ❌ (no-op)                    |
-| `set-protocol`       | ✅            | ✅            | ✅                | ❌ (forced PHY)               |
-| Auth method          | n/a           | WPA2-Personal (hardcoded) | None or WPA2 from `--ap-password` | n/a |
+| `--set-channel`      | ✅            | ❌ (from AP)  | ✅                | ✅                 | ✅        |
+| `--sta-ssid/pwd`     | ❌            | ✅            | ❌                | ❌                 | ❌        |
+| `--ap-ssid/pwd/dhcp` | ❌            | ❌            | ✅                | ❌                 | ❌        |
+| `--peer-mac`         | ❌            | ❌            | ❌                | ✅ (dst addr)      | ✅ (peer) |
+| `--ht40`             | ❌            | ❌            | ✅ (AP secondary) | ❌ (use ht40-emitter) | ✅ (HT40 PHY) |
+| `set-csi-output`     | ✅            | ✅            | ✅                | ❌ (no capture)    | ✅        |
+| `set-rate`           | ❌ (no-op)    | ❌ (no-op)    | ❌ (no-op)        | ❌ (forced PHY)    | ✅ c/p; ❌ fast |
+| `set-protocol`       | ✅            | ✅            | ✅                | ❌ (forced PHY)    | ✅        |
+| `--inject-period-ms` | ❌            | ❌            | ❌                | ✅                 | ❌        |
+| Auth method          | n/a           | WPA2-Personal (hardcoded) | None or WPA2 from `--ap-password` | n/a | n/a |
 
 ### 3.2 Apply timing: snapshot vs. immediate
 
@@ -729,7 +740,6 @@ Logger init default (`src/main.rs:234`): `LogMode::ArrayList`.
 | `--ap-dhcp` invalid                      | Prints `Invalid --ap-dhcp (use on|off)`; field unchanged   |
 | `--peer-mac` malformed                   | Prints `Invalid --peer-mac (...)`; field unchanged         |
 | `--ht40` not above/below/none            | Prints `Invalid --ht40 (...)`; field unchanged             |
-| `--inject-period-ms` not a positive int  | Prints `Invalid --inject-period-ms (...)`; field unchanged |
 | `--val-scale-cfg` outside `0..=3`        | Prints `Invalid --val-scale-cfg value ... (use 0-3)`      |
 | `--set-channel` outside `1..=14`         | Accepted by parser; rejected by radio at `start`           |
 | Input line > 256 bytes                   | Bell once, further bytes dropped silently                  |
@@ -760,7 +770,7 @@ Backspace correctly retracts quote state via `recompute_quote_state`.
 | `set-csi-output`      | Deliver captured CSI or not          | Next `start` | always        |
 | `set-log-mode`        | Output format                        | Immediate    | always        |
 | `set-csi`             | CSI feature flags (variant per chip) | Next `start` | classic / C5-C6 |
-| `set-wifi`            | Mode / SSID / pass / AP / channel / emitter dst & period | Next `start` | always |
+| `set-wifi`            | Mode / SSID / pass / AP / channel / peer / emitter period | Next `start` | always |
 | `set-protocol`        | Wi-Fi PHY protocol                   | Next `start` | always        |
 | `start`               | Begin collection (timed/indefinite)  | —            | always        |
 | `show-config`         | Print current config                 | —            | always        |

@@ -8,9 +8,9 @@ use menu::{Item, ItemType, Menu, Parameter};
 #[cfg(feature = "statistics")]
 use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
-    cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_output,
-    set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic, set_wifi,
-    show_config, start_csi_collect, version_cmd,
+    cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_filter,
+    set_csi_output, set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic,
+    set_wifi, show_config, start_csi_collect, version_cmd,
 };
 pub use crate::cli::serial::SerialInterface;
 // `is_jtag` is only compiled under `auto` (see serial.rs); match that gating
@@ -124,6 +124,55 @@ Description:
   decoded, logged, or handed to a callback. Use it for a node whose only job is
   to keep traffic on air, or to measure capture cost without delivery cost.
   An emitter captures nothing, so the setting has no effect there."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_csi_filter,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "peer-mac",
+                        argument_name: "peer-mac",
+                        help: Some("Only deliver CSI from this source MAC ('any' clears)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "min-phy",
+                        argument_name: "min-phy",
+                        help: Some("Minimum PHY class to deliver: any|ht"),
+                    },
+                ],
+            },
+            command: "set-csi-filter",
+            help: Some("set-csi-filter - Restrict which captured frames are delivered.
+
+Usage:
+  set-csi-filter [--peer-mac=<aa:bb:cc:dd:ee:ff|any>] [--min-phy=<any|ht>]
+
+Options:
+  --peer-mac=<MAC>    Deliver CSI only for frames from this source. 'any' (or an
+                      empty value) clears the filter. Default: any.
+  --min-phy=<any|ht>  Minimum PHY class. 'ht' keeps 802.11n and better, dropping
+                      the legacy-rate management/control frames. Default: any.
+
+Examples:
+  set-csi-filter --peer-mac=aa:bb:cc:dd:ee:ff
+  set-csi-filter --min-phy=ht
+  set-csi-filter --peer-mac=any --min-phy=any
+
+Description:
+  A collector is promiscuous: it reports CSI for every frame its radio decodes.
+  On a busy channel that means your AP's beacons and ACKs, the association
+  exchange, and any THIRD-PARTY device on the channel, mixed in with the traffic
+  you configured. Those rows are valid CSI, but they look wrong — the leading
+  field of a row is the frame's own 802.11 sequence number, which is
+  per-transmitter and per-TID and so does not start at 0 or share a counter with
+  your traffic, and a legacy-rate frame carries the shorter L-LTF-only payload
+  (128 bytes) rather than the HT payload.
+
+  Filtering on the device rather than on the host also returns console bandwidth
+  to the traffic you asked for: a rejected frame is dropped in the Wi-Fi callback
+  before the packet copy and before any formatting. Rejected frames are counted
+  in `show-stats` as RX drops, so the difference between captured and delivered
+  stays visible rather than unexplained."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -346,12 +395,12 @@ configurations on or off."),
                     Parameter::NamedValue {
                         parameter_name: "peer-mac",
                         argument_name: "peermac",
-                        help: Some("Emitter destination MAC (aa:bb:cc:dd:ee:ff); empty = broadcast"),
+                        help: Some("Emitter dst / ESP-NOW peer MAC; empty = broadcast or auto"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "ht40",
                         argument_name: "ht40",
-                        help: Some("softAP secondary channel: above|below|none"),
+                        help: Some("Secondary channel: above|below|none"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "inject-period-ms",
@@ -376,7 +425,11 @@ quotes, e.g. --sta-ssid='My WiFi' --sta-password=\"my pass\". Both quote styles
 are accepted. Underscores are passed through as literal `_`.
 
 Options:
-  --mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter>    Specify WiFi operation mode (default: sniffer).
+  --mode=<MODE>                                                 Specify WiFi operation mode (default: sniffer). One of:
+                                                                station, sniffer, wifi-ap, ht20-emitter,
+                                                                ht40-emitter, esp-now-central,
+                                                                esp-now-peripheral, esp-now-fast-collector,
+                                                                esp-now-fast-source.
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
   --ap-ssid=<SSID>                                              Set the SSID for wifi-ap mode (default: esp-csi-ap).
@@ -394,13 +447,21 @@ Options:
                                                                 associating to a 2.4 GHz AP needs an explicit 2.4 GHz
                                                                 channel -- the 5 GHz default makes such an AP invisible
                                                                 and reports only 'no access point found'.
-  --peer-mac=<aa:bb:cc:dd:ee:ff>                                Emitter modes: destination address of injected frames.
-                                                                Unicasting to a collector's MAC usually raises that
-                                                                collector's CSI rate. Empty value = broadcast (default).
+  --peer-mac=<aa:bb:cc:dd:ee:ff>                                One field, two meanings by mode.
+                                                                Emitter modes: destination of injected frames; empty =
+                                                                broadcast (default). Unicasting to a collector's MAC
+                                                                usually raises that collector's CSI rate.
+                                                                ESP-NOW modes: explicit peer address; empty keeps
+                                                                automatic magic-prefix pairing, and setting it switches
+                                                                to source-MAC filtering, which requires BOTH nodes to be
+                                                                configured with the other's address.
   --ht40=<above|below|none>                                     wifi-ap: run the softAP as HT40 with the given secondary
-                                                                channel (default: none = HT20).
+                                                                channel. ESP-NOW modes: force the per-peer TX PHY to
+                                                                HT40 (default: none = HT20). Does NOT select emitter
+                                                                bandwidth -- use --mode=ht40-emitter for that.
   --inject-period-ms=<NUMBER>                                   Emitter modes: delay between injected frames in ms
                                                                 (default: 20 ~= 50 frames/s).
+  --emitter-iface=<sta|ap>                                      Emitter modes: which interface injects (default: sta).
 
 Examples:
   set-wifi --mode=sniffer
@@ -409,20 +470,37 @@ Examples:
   set-wifi --mode=station --sta-ssid=MyAP --set-channel=6        # C5: pin the 2.4 GHz band
   set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
   set-wifi --mode=ht40-emitter --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
+  set-wifi --mode=esp-now-central --set-channel=6
+  set-wifi --mode=esp-now-peripheral --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
+  set-wifi --mode=esp-now-fast-collector --set-channel=6
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
   A node either EMITS (puts known RF energy on the channel, never captures) or
-  COLLECTS (captures the channel response); the collector modes differ only in
-  how they obtain frames to measure.
-  - Collector modes:
+  COLLECTS (captures the channel response) -- except the ESP-NOW pairs, which do
+  both sides of an exchange and capture from it.
+  - Emitter modes (TX only, no association; use `--set-channel`, `--peer-mac`,
+    `--inject-period-ms`):
+      - `ht20-emitter` / `ht40-emitter`: 802.11n HT PPDUs, 20 or 40 MHz. All chips.
+        Pair either with a `sniffer` collector.
+  - Wi-Fi collector modes (capture the channel response):
       - `station`: Connect to an existing WiFi network and measure its downlink.
       - `sniffer`: Lock a channel promiscuously and measure every frame overheard.
         This is the mode that pairs with an emitter.
       - `wifi-ap`: Self-contained softAP CSI collector (pair with `station` on same SSID).
-  - Emitter modes (TX only, no association; use `--set-channel`, `--peer-mac`
-    and `--inject-period-ms`):
-      - `ht20-emitter` / `ht40-emitter`: 802.11n HT PPDUs, 20 or 40 MHz. All chips.
+  - ESP-NOW pair (connectionless, no association or DHCP; both sides need the same
+    `--set-channel`):
+      - `esp-now-central` + `esp-now-peripheral`: symmetric control exchange. The
+        central drives, the peripheral replies, and both capture CSI. `set-rate`
+        applies here as the per-peer TX PHY.
+      - `esp-now-fast-collector` + `esp-now-fast-source`: asymmetric simplex, for
+        maximum packets/sec. The collector broadcasts a sparse discovery beacon
+        until it hears a source, then stops beaconing and goes RX-only; the source
+        learns the collector's MAC and unicasts a continuous flood. All the airtime
+        belongs to one transmitter, so this yields the highest CSI rate of any pair.
+  - Pairing is automatic by default (magic-prefix). Use `--peer-mac` on BOTH nodes
+    to pin an explicit pair instead, which is what you want with more than two
+    boards on one channel.
   - For AP + STA lab pairs, use `set-protocol --protocol=n` and consider `set-traffic --frequency-hz=4000`."),
         },
         &Item {
@@ -605,7 +683,8 @@ Examples:
 Description:
   Stored in the config and echoed by show-config, but no mode applies it:
   collector modes derive their rate from the surrounding radio configuration,
-  and an emitter transmits at the rate its forced TX PHY implies."),
+  and an emitter transmits at the rate its forced TX PHY implies. The ESP-NOW
+  central / peripheral pair DOES apply it, as the per-peer TX PHY."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -633,8 +712,7 @@ Examples:
 
 Description:
   Applied to the node via CSINode::set_protocol at the start of each
-  collection run. Ignored by the emitter modes, which pin their own protocol
-  set to match the forced TX PHY.
+  collection run.
 
   Pick the protocol to match your link: LR for maximum range between ESP
   devices, N when associating to a standard AP in station mode. Not every

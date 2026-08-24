@@ -105,7 +105,7 @@ embassy-time = { version = "0.5.1" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { version = "0.9", default-features = false }
+esp-csi-rs = { version = "0.10", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint
@@ -119,9 +119,10 @@ embedded-io = "0.6.1"
 # `esp-csi-rs` depends on it by version, and an unpatched 0.1.1 from crates.io
 # would still carry the old central/peripheral API. Remove both lines once the
 # two crates are released.
+# `esp-csi-rs` 0.10 absorbed the engine that used to live in `esp-csi-rs-core`, so
+# there is one crate to patch rather than two. Remove this once 0.10 is on crates.io.
 [patch.crates-io]
 esp-csi-rs = { git = "https://github.com/csi-rs/esp-csi-rs.git", branch = "feat/emitter-collector" }
-esp-csi-rs-core = { git = "https://github.com/csi-rs/esp-csi-rs-core.git", branch = "feat/emitter-collector" }
 
 [profile.dev]
 # Rust debug is too slow.

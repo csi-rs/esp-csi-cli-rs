@@ -38,6 +38,7 @@ pub fn enter_root(
     set-wifi                Configure WiFi settings (e.g., mode).
     set-traffic             Configure traffic-related parameters (e.g. interval).
     set-csi-output          Toggle off-device delivery of captured CSI (true|false).
+    set-csi-filter          Restrict delivered CSI by source MAC and/or PHY class.
     set-log-mode            Set the CSI output logging format (text, array-list, serialized).
     set-csi                 Configure CSI feature flags (e.g., LLTF, HTLTF).
     set-rate                Record the Wi-Fi PHY rate (reporting only).

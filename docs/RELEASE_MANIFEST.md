@@ -41,7 +41,8 @@ Or run the workflow manually from the Actions tab and supply the tag.
     "esp32": {
       "url": "https://github.com/csi-rs/esp-csi-cli-rs/releases/download/v0.7.0/esp-csi-cli-rs-esp32.bin",
       "sha256": "<hex>",
-      "flash_address": 0
+      "flash_address": 0,
+      "baud": 115200
     },
     "esp32c3": { "url": "...", "sha256": "...", "flash_address": 0 },
     "esp32c5": { "url": "...", "sha256": "...", "flash_address": 0 },
@@ -58,6 +59,20 @@ Or run the workflow manually from the Actions tab and supply the tag.
 | `url` | Direct download URL on the GitHub release |
 | `sha256` | Lowercase hex digest of the `.bin` file |
 | `flash_address` | Byte offset for `espflash write-bin` (merged images use `0`) |
+| `baud` | Console baud rate the image was **built** at (`ESP_CSI_CLI_UART_BAUD`, default `115200`) |
+
+### Why `baud` is in the manifest
+
+The console rate is fixed at build time, not settable at runtime (see the CLI README). The firmware
+declares it in its own `info` block as `baud=`, but that can only *confirm* the rate once a host is
+already talking at it — a host that opens the port at the wrong rate reads garbage that looks like a
+hardware fault rather than a settings mismatch. Tooling that has to choose a rate before the first
+byte has nowhere else to learn it, so it travels with the image.
+
+Pass it as the fifth argument to `generate-release-manifest.sh`, or set `ESP_CSI_CLI_UART_BAUD` in
+the environment that runs it — the same variable that selects the rate for the build itself, so a
+release built with a raised baud and a manifest generated in the same job cannot disagree. Absent
+from an older manifest means `115200`.
 
 ### Chip keys
 
