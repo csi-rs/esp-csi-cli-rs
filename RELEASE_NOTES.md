@@ -2,42 +2,47 @@
 
 ## Unreleased
 
-### Emitter / collector naming migration (BREAKING — no aliases)
+### Emitter / collector roles added alongside the ESP-NOW pairs (BREAKING)
 
-`esp-csi-rs-core` replaced the ESP-NOW central/peripheral architecture with two
-exhaustive roles: an **emitter** puts known RF energy into the channel and never
-captures; a **collector** captures the channel's response. Everything below
-follows from that. Host tooling must be updated — there are deliberately **no
-legacy aliases**, so the old strings fail loudly instead of silently drifting.
+The engine gained two exhaustive roles — an **emitter** puts known RF energy into
+the channel and never captures; a **collector** captures the channel's response —
+and the CLI exposes them. The ESP-NOW central/peripheral pairs are **retained**,
+not replaced: both families are supported, and `set-wifi --mode=` now accepts
+nine values. Host tooling must be updated for the renamed commands below; there
+are deliberately **no legacy aliases**, so old strings fail loudly rather than
+drifting silently.
 
-- **ESP-NOW modes removed.** `esp-now-central`, `esp-now-peripheral`,
-  `esp-now-fast-collector`, and `esp-now-fast-source` no longer parse — the
-  transport is gone from core. For a controlled sounding pair use an emitter mode
-  plus a `sniffer` collector, which needs no association or handshake.
+- **ESP-NOW modes retained.** `esp-now-central`, `esp-now-peripheral`,
+  `esp-now-fast-collector` and `esp-now-fast-source` parse as they always did.
+  An earlier draft of this changelog announced their removal; that did not happen
+  and the entry was wrong.
 - **New emitter modes.** `ht20-emitter` / `ht40-emitter` bring up an
   unassociated STA at a forced HT TX PHY and loop-inject a rate-agnostic sounding
   frame (20 MHz, or 40 MHz with the secondary above the primary). TX only — an
   emitter never captures CSI. Configure with `--set-channel`, `--peer-mac`
-  (injection destination, default broadcast) and `--inject-period-ms`.
-  Previously these existed only in the proprietary firmware.
+  (injection destination, default broadcast) and `--inject-period-ms`. Pair
+  either with a `sniffer` collector.
 - **`set-collection-mode` → `set-csi-output`.** `--mode=collector|listener` is
   replaced by `--enabled=true|false` (default `true`), mapping to core's
   `CSINode::set_csi_output_enabled`. With delivery off the radio still captures —
   RX path and its timing unchanged — but nothing is decoded, logged, or handed to
   a callback. It has no effect on an emitter, which captures nothing. "Collector"
   now names the RX role, so it can no longer also name a delivery setting.
-- **`--peer-mac` / `--ht40` retargeted.** `--peer-mac` is now the emitter's
-  injection destination (empty = broadcast); `--ht40` is the `wifi-ap` softAP
-  secondary channel only — use `--mode=ht40-emitter` for 40 MHz emission.
-- **`set-rate` is reporting-only.** Nothing applies it now that ESP-NOW is gone:
-  collectors derive their rate from the surrounding radio configuration and an
-  emitter transmits at the rate its forced TX PHY implies.
+- **`--peer-mac` / `--ht40` are read per mode.** `--peer-mac` is the emitter's
+  injection destination (empty = broadcast) or the explicit ESP-NOW peer (empty =
+  automatic pairing). `--ht40` is the `wifi-ap` softAP secondary channel, or the
+  per-peer HT40 TX PHY in the ESP-NOW modes; it never selects emitter bandwidth —
+  use `--mode=ht40-emitter` for that.
+- **`set-rate` applies to the ESP-NOW central / peripheral pair** as the per-peer
+  TX PHY. It is a no-op elsewhere: collectors derive their rate from the
+  surrounding radio configuration, an emitter transmits at the rate its forced TX
+  PHY implies, and the fast simplex pair fixes its own.
 - **`show-stats` drops the ESP-NOW TX queued / confirmed / failed counters.**
 - `CLI_PROTOCOL_VERSION` stays at **2** — the `info` grammar is unchanged; only
   the command and mode vocabulary moved.
-- **Dependencies** — `esp-csi-rs` / `esp-csi-rs-core` are resolved from their
-  `feat/emitter-collector` branches via `[patch.crates-io]` until the role API is
-  released.
+- **Dependencies** — requires `esp-csi-rs 0.10`, which absorbed the engine that
+  briefly lived in `esp-csi-rs-core`. Resolved from the `feat/emitter-collector`
+  branch via `[patch.crates-io]` until 0.10 reaches crates.io.
 
 - **Migrated to `esp-csi-rs 0.9`** (open facade over `esp-csi-rs-core`).
 
