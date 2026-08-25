@@ -41,8 +41,8 @@ drifting silently.
 - `CLI_PROTOCOL_VERSION` stays at **2** — the `info` grammar is unchanged; only
   the command and mode vocabulary moved.
 - **Dependencies** — requires `esp-csi-rs 0.10`, which absorbed the engine that
-  briefly lived in `esp-csi-rs-core`. Resolved from the `feat/emitter-collector`
-  branch via `[patch.crates-io]` until 0.10 reaches crates.io.
+  briefly lived in `esp-csi-rs-core`. It resolves straight from crates.io; no
+  `[patch.crates-io]` entry is needed to build this firmware.
 
 - **Migrated to `esp-csi-rs 0.9`** (open facade over `esp-csi-rs-core`).
 
