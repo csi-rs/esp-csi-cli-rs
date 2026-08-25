@@ -18,13 +18,13 @@ In order to use this crate, you would need to flash the source code for your tar
 
 ## Features
 
-* **Multiple Wi-Fi Modes:** Configure the ESP device as a Station, Sniffer, softAP collector (`wifi-ap`), ESP-NOW Central/Peripheral, or ESP-NOW fast simplex (collector + source).
+* **Emitters, Wi-Fi collectors, and ESP-NOW pairs:** an emitter puts known RF energy on the channel and never captures — `ht20-emitter` / `ht40-emitter` (802.11n, all chips), pairing with a sniffer. Wi-Fi collectors capture the channel response — Sniffer, Station, softAP (`wifi-ap`). The connectionless ESP-NOW pairs need no association or DHCP: `esp-now-central` + `esp-now-peripheral` for a symmetric exchange where both sides capture, and `esp-now-fast-collector` + `esp-now-fast-source` for asymmetric simplex at the highest achievable CSI rate.
 * **Traffic Generation:** Generate traffic at configurable intervals.
 * **Fine-grained CSI Control:** Enable or disable specific CSI features like LLTF, HTLTF, STBC HTLTF, and LTF Merge.
-* **PHY Rate / IO Task Control:** Pin the ESP-NOW PHY rate and toggle TX or RX direction tasks at the CLI.
+* **IO Task Control:** Toggle TX or RX direction tasks at the CLI.
 * **Runtime Delivery Switching:** Flip CSI delivery between async-queued, inline callback, and off without re-flashing.
-* **Statistics Snapshot:** `show-stats` reports PPS, drops, and one/two-way ESP-NOW latency on demand.
-* **Collection Mode:** Switch the node between Collector and Listener roles at runtime.
+* **Statistics Snapshot:** `show-stats` reports PPS, rates, and drops on demand.
+* **CSI Output Gate:** `set-csi-output --enabled=false` keeps capture (and its timing) running while suppressing all decoding and logging.
 * **Flexible Log Format:** Choose between human-readable text, compact array-list, binary serialized, or ESP-CSI-Tool-compatible CSV output.
 * **CLI Control:** Interact with the device using simple commands over a serial connection.
 * **Early Stop:** Press `q` to abort a running collection — even an indefinite one — without resetting the board.
@@ -83,7 +83,7 @@ details.
     | `defmt`       | Log via `defmt` (efficient binary logging)                           |
     | `auto`        | Auto-select JTAG or UART backend at runtime (default)                |
     | `async-print` | Non-blocking async logging (auto-enabled by `jtag-serial`)           |
-    | `statistics`  | Expose runtime PPS/rate/drop + ESP-NOW TX counters via `show-stats` (default) |
+    | `statistics`  | Expose runtime PPS / rate / drop counters via `show-stats` (default) |
     | `jtag-serial` | Force JTAG serial backend (auto-enables `async-print`)               |
     | `uart`        | Force UART backend (do **not** combine with `async-print`)          |
 
@@ -111,7 +111,7 @@ details.
 ## CLI Commands
 
 This is a list of commands available through the CLI interface:
-> 📝 The `set-csi` command options differ on the ESP32-C5 and ESP32-C6 (which expose the HE/STBC field set instead of the classic LLTF/HTLTF flags).
+> 📝 The `set-csi` command options differ on the ESP32-C5 and ESP32-C6 (which expose per-PPDU-format acquisition flags — legacy / HT20 / HT40, plus VHT20 and forced L-LTF on C5 — instead of the classic LLTF/HTLTF flags).
 
 * **`help [command]`**
     * Description: Display the main help menu or details for a specific command.
@@ -125,13 +125,32 @@ This is a list of commands available through the CLI interface:
         * `set-traffic --frequency-hz=10`
         * `set-traffic --frequency-hz=0`
 
-* **`set-collection-mode [OPTIONS]`**
-    * Description: Set the CSI node collection role.
+* **`set-csi-output [OPTIONS]`**
+    * Description: Toggle off-device delivery of captured CSI. With delivery off the radio still captures — RX path and timing unchanged — but nothing is decoded, logged, or handed to a callback. No effect on an emitter, which captures nothing.
     * Options:
-        * `--mode=<collector|listener>`: `collector` actively generates and collects CSI data (default). `listener` passively receives CSI data only.
+        * `--enabled=<true|false>`: Deliver captured CSI (default: `true`).
     * Examples:
-        * `set-collection-mode --mode=collector`
-        * `set-collection-mode --mode=listener`
+        * `set-csi-output --enabled=true`
+        * `set-csi-output --enabled=false`
+        * `set-csi --htltf=off`
+
+* **`set-csi-filter [OPTIONS]`**
+    * Description: Restrict which captured frames are delivered, by source MAC and/or PHY class. A
+      collector is promiscuous — it reports CSI for every frame its radio decodes, including your
+      AP's beacons and ACKs and any third-party device on the channel. See
+      [What the first rows of a collection are](#what-the-first-rows-of-a-collection-are).
+    * Options:
+        * `--peer-mac=<aa:bb:cc:dd:ee:ff|any>`: Deliver CSI only for frames from this source. `any`
+          (or an empty value) clears the filter (default: `any`).
+        * `--min-phy=<any|ht>`: Minimum PHY class. `ht` keeps 802.11n and better, dropping the
+          legacy-rate management/control frames (default: `any`).
+    * Examples:
+        * `set-csi-filter --peer-mac=aa:bb:cc:dd:ee:ff`
+        * `set-csi-filter --min-phy=ht`
+        * `set-csi-filter --peer-mac=any --min-phy=any`
+    * Note: filtering on the device rather than on the host also returns console bandwidth to the
+      traffic you configured — a rejected frame is dropped in the Wi-Fi callback before the packet
+      copy and before any formatting. Rejected frames are counted as RX drops in `show-stats`.
 
 * **`set-log-mode [OPTIONS]`**
     * Description: Set the CSI output logging format at runtime.
@@ -171,7 +190,7 @@ This is a list of commands available through the CLI interface:
 * **`set-wifi [OPTIONS]`**
     * Description: Configure WiFi and network settings. **Note:** SSIDs/passwords with spaces should be wrapped in single or double quotes (e.g. `--sta-ssid='My Network'` or `--sta-ssid="My Network"`). Both quote styles are interchangeable. Underscores (`_`) are passed through literally.
     * Options:
-        * `--mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>`: Specify WiFi operation mode (default: `sniffer`).
+        * `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>`: Specify WiFi operation mode (default: `sniffer`).
         * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
         * `--sta-password=<PASSWORD>`: Set the password for Station mode.
         * `--ap-ssid=<SSID>`: Set the SSID for wifi-ap mode (default: `esp-csi-ap`).
@@ -189,13 +208,17 @@ This is a list of commands available through the CLI interface:
         * `--set-channel=<NUMBER>`: Set the WiFi channel. Use 1–14 on 2.4 GHz; on ESP32-C5
           use 5 GHz channels such as 149 (default: 1 on most chips,
           149 on ESP32-C5).
-        * `--peer-mac=<aa:bb:cc:dd:ee:ff>`: ESP-NOW explicit peer MAC (all ESP-NOW modes including fast simplex).
-        * `--ht40=<above|below|none>`: ESP-NOW forced HT40 TX PHY (all ESP-NOW modes including fast simplex).
+        * `--peer-mac=<aa:bb:cc:dd:ee:ff>`: One field, two meanings by mode. **Emitter modes** — destination address of injected frames; empty = broadcast (default), and unicasting to a collector usually raises that collector's CSI rate. **ESP-NOW modes** — explicit peer address; empty keeps automatic magic-prefix pairing, and setting it switches to source-MAC filtering, which requires **both** nodes to be configured with the other's address (use it when more than two boards share a channel).
+        * `--ht40=<above|below|none>`: `wifi-ap` mode — softAP secondary channel. ESP-NOW modes — force the per-peer TX PHY to HT40 (default: `none` = HT20). This does **not** pick emitter bandwidth; use `--mode=ht40-emitter` for that.
+        * `--inject-period-ms=<MS>`: Emitter modes — delay between injected frames (default: `20` ≈ 50 frames/s).
+        * `--emitter-iface=<sta|ap>`: Emitter modes — which interface injects (default: `sta`).
     * Examples:
         * `set-wifi --mode=sniffer --set-channel=6`
         * `set-wifi --mode=station --sta-ssid="My Network" --sta-password="my password"`
         * `set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap`
-        * `set-wifi --mode=esp-now-fast-collector --set-channel=6`
+        * `set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20`
+        * `set-wifi --mode=ht40-emitter --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff`
+        * `set-wifi --mode=esp-now-central --set-channel=6`
         * `set-wifi --mode=esp-now-fast-source --set-channel=6`
 
 * **`start [OPTIONS]`**
@@ -214,8 +237,8 @@ This is a list of commands available through the CLI interface:
     * Description: Reset all configurations to their default values.
     * Example: `reset-config`
 
-* **`set-rate [OPTIONS]`** *(ESP-NOW and fast simplex modes)*
-    * Description: Pin the Wi-Fi PHY rate used by ESP-NOW central / peripheral / fast simplex nodes. Sniffer and station modes ignore this and derive their rate from the surrounding radio configuration.
+* **`set-rate [OPTIONS]`** *(reporting only)*
+    * Description: Set the Wi-Fi PHY rate. Applied as the per-peer TX PHY by the `esp-now-central` / `esp-now-peripheral` pair. Ignored elsewhere: the Wi-Fi collector modes derive their rate from the surrounding radio configuration, an emitter transmits at the rate its forced TX PHY implies, and the fast simplex pair takes its rate from its own profile.
     * Options:
         * `--rate=<NAME>`: One of `mcs0-lgi` (default), `mcs1-lgi`..`mcs7-lgi`, `mcs0-sgi`, `1m`, `2m`, `5m5`, `11m`, `6m`, `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`.
     * Examples:
@@ -228,8 +251,9 @@ This is a list of commands available through the CLI interface:
         * `--tx=<on|off>`: Enable or disable the TX task. Omit to keep the current state.
         * `--rx=<on|off>`: Enable or disable the RX task. Omit to keep the current state.
     * Examples:
-        * `set-io-tasks --tx=off`         (listener-only)
+        * `set-io-tasks --tx=off`         (receive-only)
         * `set-io-tasks --tx=on --rx=on`  (default)
+    * Note: to stop CSI *delivery* while leaving the RX path and its timing intact, use `set-csi-output --enabled=false` instead.
 
 * **`set-csi-delivery [OPTIONS]`**
     * Description: Switch the CSI delivery mode at runtime, and independently toggle the inline UART/JTAG log gate. The two delivery paths are mutually exclusive — the WiFi callback only ever pays for one per packet.
@@ -249,13 +273,14 @@ This is a list of commands available through the CLI interface:
         version=<version>
         chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
         protocol=<u32>
+        baud=<u32>
         features=<comma-separated-list>
         END-INFO
         ```
     * Example: `info`
 
 * **`show-stats`** *(requires `statistics` feature, on by default)*
-    * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, RX dropped packets, one-way and two-way ESP-NOW latency. Counters reset on the start of each new `start` collection.
+    * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, and RX dropped packets. Counters reset on the start of each new `start` collection.
     * Example: `show-stats`
 
 ## CLI Configuration Examples
@@ -276,34 +301,57 @@ This is a list of commands available through the CLI interface:
     start --duration=300
     ```
 
-3.  **Configure an ESP as an ESP-NOW Central node in listener mode and collect for 2 minutes:**
+3.  **HT emitter + sniffer collector (any chip — the controlled pairing):**
     ```
-    set-wifi --mode=esp-now-central
-    set-collection-mode --mode=listener
+    # Collector board (sniffer on the emitter's channel, no self-generated traffic)
+    set-wifi --mode=sniffer --set-channel=6
+    set-traffic --frequency-hz=0
     set-log-mode --mode=array-list
-    show-config
-    start --duration=120
-    ```
-
-4.  **ESP-NOW pair: pin the PHY rate and disable TX on the listener node, then check stats mid-run:**
-    ```
-    set-wifi --mode=esp-now-peripheral
-    set-rate --rate=mcs0-lgi
-    set-io-tasks --tx=off
-    set-csi-delivery --mode=async --logging=on
     start
-    # ... in another window or after pressing 'q' to stop:
+
+    # Emitter board (use ht40-emitter for 40 MHz bonded)
+    set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
+    start
+    ```
+    An emitter never associates and its frames carry no payload meaning, so one
+    emitter sounds any number of sniffer collectors at once; unicasting with
+    `--peer-mac` to one collector tends to raise that collector's CSI rate.
+
+4.  **ESP-NOW central + peripheral (any chip — connectionless, no AP needed):**
+    ```
+    # Central board (drives the exchange)
+    set-wifi --mode=esp-now-central --set-channel=6
+    set-rate --rate=mcs0-lgi
+    set-log-mode --mode=array-list
+    start
+
+    # Peripheral board (replies; both sides capture CSI)
+    set-wifi --mode=esp-now-peripheral --set-channel=6
+    set-rate --rate=mcs0-lgi
+    set-log-mode --mode=array-list
+    start
+    ```
+    Both boards must be on the same `--set-channel`. Pairing is automatic; with more
+    than two boards on the channel, set `--peer-mac` on both to pin the pair.
+
+5.  **Keep a node's traffic on air without paying for CSI delivery, then check stats:**
+    ```
+    set-wifi --mode=wifi-ap --set-channel=6
+    set-csi-output --enabled=false
+    set-traffic --frequency-hz=4000
+    start
+    # ... after pressing 'q' to stop:
     show-stats
     ```
 
-5.  **Emit ESP32-CSI-Tool-compatible CSV for a host pipeline:**
+6.  **Emit ESP32-CSI-Tool-compatible CSV for a host pipeline:**
     ```
     set-wifi --mode=sniffer --set-channel=6
     set-log-mode --mode=esp-csi-tool
     start --duration=60
     ```
 
-6.  **SoftAP lab pair (board A = AP collector, board B = station on same SSID):**
+7.  **SoftAP lab pair (board A = AP collector, board B = station on same SSID):**
     ```
     # Board A (AP collector)
     set-wifi --mode=wifi-ap --set-channel=6 --ap-ssid=esp-csi-ap
@@ -318,7 +366,7 @@ This is a list of commands available through the CLI interface:
     start
     ```
 
-7.  **5 GHz associated AP/STA pair (ESP32-C5 — serialized high-rate CSI):**
+8.  **5 GHz associated AP/STA pair (ESP32-C5 — serialized high-rate CSI):**
     ```
     # Board A (AP collector — 5 GHz ch149 on C5)
     set-wifi --mode=wifi-ap --set-channel=149 --ap-ssid=esp-csi-ap
@@ -353,16 +401,162 @@ This is a list of commands available through the CLI interface:
     offered airtime becomes `frequency-hz × N`, so lower
     `set-traffic --frequency-hz` if the channel saturates.
 
-8.  **ESP-NOW fast simplex (max CSI pps — collector + source on same channel):**
+9.  **ESP-NOW fast simplex pair (highest CSI rate of any pairing):**
     ```
-    # Collector board
+    # Collector board — sparse discovery beacon, then RX-only
     set-wifi --mode=esp-now-fast-collector --set-channel=6
+    set-log-mode --mode=serialized
     start
 
-    # Source board
+    # Source board — learns the collector's MAC, then unicasts a continuous flood
     set-wifi --mode=esp-now-fast-source --set-channel=6
     start
     ```
+    Asymmetric on purpose: the collector stops transmitting once it has heard the
+    source, so all the airtime belongs to a single transmitter. Start the collector
+    first so the beacon is already on air when the source comes up. `set-rate` does
+    not apply here — the fast profile fixes its own PHY.
+
+## Console throughput
+
+**The console, not the radio, is usually what limits your sample rate.** A collector captures at the
+offered traffic rate; whether you *see* those samples depends on how many bytes each one costs on the
+serial link.
+
+At the default 115200 baud, an `array-list` line for a 384-sample payload is ~2.2 kB — about 190 ms
+on the wire. That write is **blocking and happens inside the Wi-Fi RX callback**, so a line that
+takes longer to send costs you the CSI reports that arrive while it is sending. Bytes per sample is
+therefore the number that decides your rate.
+
+Measured on two ESP32-WROOM boards over a CH340 bridge, 400 Hz offered, station RX-only:
+
+| log mode / payload | @115200 | @921600 |
+|---|---|---|
+| `array-list`, all LTF (384 samples) | 8.9 CSI/s | 60.4 CSI/s |
+| `array-list`, L-LTF only (128 samples) | 22.7 CSI/s | 115.2 CSI/s |
+| `serialized` (binary), all LTF | 27.5 CSI/s | 120.0 CSI/s |
+
+At 115200 the `array-list` row is pushing ~10.8 kB/s of an 11.5 kB/s line — the wire is saturated, so
+that figure is the ceiling for that format at that baud. At 921600 `array-list` runs at ~86% of line
+rate, and what limits the other two rows there is how many frames the radio captured, not the
+console.
+
+Expect run-to-run variance: on a shared 2.4 GHz channel the number of frames a collector actually
+captures moved by more than 2x between sessions on the same bench, with the boards untouched. Compare
+against `show-stats`' own `RX Total Packets` rather than against a number from a previous run.
+
+Three levers, cheapest first:
+
+1. **`set-csi --htltf=off --stbc-htltf=off`** — acquire only the L-LTF field. ~2.5x at 115200, no
+   rebuild, and every sample you get is still a complete field. This is the right way to shorten a
+   CSI line: the radio stops *capturing* what you do not want, so it also does less work per frame
+   and captures more frames (measured 439 vs 205 captured over the same 15 s). Use it when the
+   64-subcarrier legacy estimate is enough for your application.
+2. **`set-log-mode --mode=serialized`** — binary COBS/postcard instead of decimal text. ~3x at
+   115200 while keeping the full payload. Requires a matching deserializer on the host.
+3. **Raise the console baud** — see below. The only lever that removes the ceiling rather than
+   working under it: ~7x for `array-list` at 921600.
+
+> 📝 There is deliberately **no option to truncate a CSI payload** to a sample count. Cutting a line
+> short discards subcarriers the radio already spent airtime capturing, and an arbitrary cap lands
+> mid-LTF-field, which is not a meaningful measurement. Lever 1 does the same thing properly and
+> measured *faster* than truncating to the same 128 bytes (22.7 vs 21.0 CSI/s, and 439 vs 446 frames
+> captured), because the saving happens before the capture rather than after it.
+
+A fourth, if third-party traffic is part of the problem: `set-csi-filter` drops frames before they
+are ever formatted, so everything it rejects is console bandwidth handed back to the traffic you
+configured.
+
+### `defmt` does not raise the CSI rate
+
+A `defmt` build is **not** a throughput lever, despite being the more efficient logger in general.
+Measured on the same pair of boards at 115200, station RX-only:
+
+| config | `println` | `defmt` |
+|---|---|---|
+| `array-list`, 384 samples | 9.26 CSI/s (1185 B/sample) | 9.53 CSI/s (1176 B/sample) |
+| `serialized` | 27.80 CSI/s (399 B/sample) | 27.93 CSI/s (389 B/sample) |
+
+Within a few percent either way — run-to-run noise — and every row sits at 94-97% of line rate in
+both builds. The reason is that `defmt` earns its keep by interning *format strings* at compile time,
+and a CSI line has none to intern: the line is formatted first and then handed to `defmt` as a single
+runtime `{=str}` argument, so the bytes on the wire are the same ASCII either way. In `serialized`
+mode it is mildly counterproductive — the COBS frame is wrapped in a `defmt` frame, so you pay both
+framings.
+
+Choose `defmt` for what it is actually good at — compact structured logs and host-side decoding
+against the ELF — and reach for the levers above for CSI throughput.
+
+Verify with `show-stats`: `RX Total Packets` counts what the radio captured and `RX Dropped Pkts`
+counts what was discarded, so the gap between that and the rows your host recorded is the console
+loss. Counters are zeroed at the start of each `start` and **survive** the end of the run, so read
+them after stopping.
+
+### Console baud is a build-time setting
+
+The baud rate is fixed when you build, via the `ESP_CSI_CLI_UART_BAUD` environment variable
+(default `115200`), and there is deliberately **no runtime command** to change it: a `set-uart`
+command would have to change the rate of the very console carrying the command, so the reply is
+either lost or sent at the old rate while the host has already switched, and surviving a reset would
+need a persisted setting or a renegotiation handshake. Instead the rate is immutable per image and
+*declared* — `info` reports it as `baud=`, and the release `manifest.json` carries it per asset for
+tooling that must pick a rate before the first byte.
+
+The variable composes with every existing alias, so there is no parallel set of aliases to keep in
+step:
+
+```bash
+ESP_CSI_CLI_UART_BAUD=921600 cargo esp32-build
+ESP_CSI_CLI_UART_BAUD=460800 cargo esp32c6-defmt
+```
+
+Or commit the choice for a checkout by adding it to `.cargo/config.toml`, which is the better home
+for it — the rate then travels with the repo instead of living in whoever's shell history:
+
+```toml
+[env]
+ESP_CSI_CLI_UART_BAUD = { value = "921600", force = true }
+```
+
+`force = true` makes the committed value win over a stale `ESP_CSI_CLI_UART_BAUD` already exported in
+a shell. Changing either the variable or that line rebuilds — the build script declares
+`rerun-if-env-changed`, so an image can never silently keep a previously compiled rate.
+
+> 🛑 Open your serial port at the matching rate — `espflash monitor --baud 921600`, or
+> `serial.Serial(port, 921600)`. The build prints a warning naming the rate whenever it is not the
+> default.
+
+> 📝 The **ROM bootloader banner is always emitted at 115200**, whatever you build at. The first few
+> lines after a reset are therefore unreadable at a higher rate. This is normal; the firmware's own
+> banner (`ESP-CSI-CLI/<version>`) arrives at the configured rate.
+
+## What the first rows of a collection are
+
+Every collection begins with rows that look wrong: a large arbitrary number in the leading field, and
+a CSI payload length that differs from the rest, before settling into a clean `0, 1, 2, 3, …`
+sequence at a consistent length. **None of these are dummy or initialization packets — every one is a
+real CSI report.** Two things explain the appearance:
+
+**The leading field is not a packet counter.** It is `sequence_number`, the raw 802.11
+sequence-control value of the received frame. That is per-transmitter *and* per-TID, so it does not
+start at zero and does not share a counter with your traffic. Your data flood appears to "start at 0"
+because QoS data frames use their own TID counter, separate from the management frames that precede
+them.
+
+**A different payload length is a different PHY, and often a different device.** A collector is
+promiscuous; it reports CSI for every frame its radio decodes:
+
+| `csi_data_len` | `sig_mode` | what it is |
+|---|---|---|
+| 128 | 0 (non-HT) | the L-LTF-only 64-subcarrier estimate: beacons, auth/assoc, ACKs — **and any third-party device on your channel** |
+| 256 / 384 | 1 (HT) | your configured traffic (256 = HT20 L-LTF + HT-LTF, 384 = HT40) |
+
+To keep only your own traffic, either filter **on the device** with
+`set-csi-filter --peer-mac=<ap-mac> --min-phy=ht` (which also returns console bandwidth, since
+rejected frames are never formatted), or filter on the host: in `array-list` mode the source MAC is
+the **last field on each line**, after the payload array, and `sig_mode` / `csi_data_len` identify
+the PHY. Filtering by MAC is the reliable one — a busy channel will always give you third-party
+frames otherwise.
 
 ## Important Notes
 

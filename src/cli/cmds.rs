@@ -1,10 +1,6 @@
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 use embedded_io::Write;
-#[cfg(feature = "statistics")]
-use esp_csi_rs::central::esp_now::{
-    get_tx_confirmed_packets, get_tx_failed_packets, get_tx_queued_packets,
-};
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
 use esp_csi_rs::{CsiDeliveryMode, set_csi_delivery_mode, set_csi_logging_enabled};
@@ -136,7 +132,7 @@ fn parse_on_off(s: &str) -> Option<bool> {
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 /// CLI command: `set-csi` (ESP32-C6 variant)
 ///
-/// Configures ESP32-C6-specific HE/STBC CSI acquisition flags in [`USER_CONFIG`].
+/// Configures the per-PPDU-format CSI acquisition flags in [`USER_CONFIG`].
 /// Each acquisition flag is an explicit `on|off` toggle, so features can be
 /// re-enabled after being turned off without a `reset-config`.
 ///
@@ -378,7 +374,7 @@ pub fn set_csi<'a>(
 /// Configures WiFi/radio operating parameters stored in [`USER_CONFIG`].
 ///
 /// # Options
-/// - `--mode=<station|sniffer|wifi-ap|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operating mode.
+/// - `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operating mode.
 /// - `--sta-ssid=<SSID>` — SSID for Station mode. Wrap in `'...'` or `"..."` to include spaces; underscores are passed through literally.
 /// - `--sta-password=<PASSWORD>` — Password for Station mode. Same quoting rules as `--sta-ssid`.
 /// - `--ap-ssid=<SSID>` — SSID for wifi-ap mode. Same quoting rules as `--sta-ssid`.
@@ -390,6 +386,9 @@ pub fn set_csi<'a>(
 ///   tick sends one frame back-to-back to every associated station for
 ///   time-aligned multi-receiver CSI (total airtime = frequency-hz × leases).
 /// - `--set-channel=<NUMBER>` — WiFi channel (1–14).
+/// - `--peer-mac=<aa:bb:cc:dd:ee:ff>` — emitter injection destination, or explicit ESP-NOW peer.
+/// - `--inject-period-ms=<MS>` — emitter inter-frame period.
+/// - `--ht40=<above|below|none>` — softAP secondary channel.
 ///
 /// Prints the updated WiFi configuration after applying changes.
 pub fn set_wifi<'a>(
@@ -431,6 +430,12 @@ pub fn set_wifi<'a>(
                     }),
                     "wifi-ap" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiAccessPoint;
+                    }),
+                    "ht20-emitter" => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::Ht20Emitter;
+                    }),
+                    "ht40-emitter" => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::Ht40Emitter;
                     }),
                     "esp-now-central" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::EspNowCentral;
@@ -551,8 +556,10 @@ pub fn set_wifi<'a>(
             None => writeln!(serial, "Invalid --ap-burst (use on|off)").unwrap(),
         }
     }
-    // ESP-NOW explicit peer MAC. An empty value clears it (back to automatic
-    // magic-prefix pairing); a valid MAC switches to per-node peer filtering.
+    // One field, read differently per mode. Emitter modes: injection destination, empty
+    // = broadcast. ESP-NOW modes: explicit peer, empty = automatic magic-prefix pairing;
+    // setting it switches to source-MAC filtering, which needs BOTH nodes configured with
+    // the other's address.
     if let Ok(Some(s)) = peer_mac {
         if s.is_empty() {
             USER_CONFIG.lock(|config| {
@@ -566,7 +573,7 @@ pub fn set_wifi<'a>(
             writeln!(serial, "Invalid --peer-mac (use aa:bb:cc:dd:ee:ff)").unwrap();
         }
     }
-    // ESP-NOW forced HT40 transmit PHY. `none` reverts to HT20/legacy per rate.
+    // softAP secondary channel. `none` keeps the AP at HT20.
     if let Ok(Some(s)) = ht40 {
         match s {
             "above" => USER_CONFIG.lock(|config| {
@@ -581,6 +588,33 @@ pub fn set_wifi<'a>(
                 config.borrow_mut().as_mut().unwrap().ht40_secondary = None;
             }),
             _ => writeln!(serial, "Invalid --ht40 (use above|below|none)").unwrap(),
+        }
+    }
+    // Emitter inter-frame period; the HT20/HT40 emitters' only rate control.
+    if let Ok(Some(s)) = argument_finder(item, args, "inject-period-ms") {
+        match s.parse::<u32>() {
+            Ok(ms) if ms > 0 => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().inject_period_ms = ms;
+            }),
+            _ => writeln!(
+                serial,
+                "Invalid --inject-period-ms (use a positive integer)"
+            )
+            .unwrap(),
+        }
+    }
+
+    // Which interface an emitter injects on. The driver accepts raw TX on both,
+    // but only one may actually radiate on a given chip.
+    if let Ok(Some(v)) = argument_finder(item, args, "emitter-iface") {
+        match v.to_ascii_lowercase().as_str() {
+            "sta" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().emitter_use_sta_if = true;
+            }),
+            "ap" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().emitter_use_sta_if = false;
+            }),
+            _ => writeln!(serial, "Invalid --emitter-iface '{}' (use sta|ap)", v).unwrap(),
         }
     }
 
@@ -625,18 +659,23 @@ pub fn set_wifi<'a>(
         match cfg.peer_mac {
             Some(m) => writeln!(
                 serial,
-                "ESP-NOW Peer MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                "Peer MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} (emitter dst / ESP-NOW peer)",
                 m[0], m[1], m[2], m[3], m[4], m[5]
             )
             .unwrap(),
-            None => writeln!(serial, "ESP-NOW Peer MAC: auto").unwrap(),
+            None => writeln!(
+                serial,
+                "Peer MAC: unset (emitter broadcasts / ESP-NOW auto-pairs)"
+            )
+            .unwrap(),
         }
         let ht40_str = match cfg.ht40_secondary {
             Some(SecondaryChannel::Above) => "HT40 (secondary above)",
             Some(SecondaryChannel::Below) => "HT40 (secondary below)",
             _ => "HT20/legacy",
         };
-        writeln!(serial, "ESP-NOW TX PHY: {}", ht40_str).unwrap();
+        writeln!(serial, "Secondary Channel: {}", ht40_str).unwrap();
+        writeln!(serial, "Emitter Period: {}ms", cfg.inject_period_ms).unwrap();
     });
 }
 
@@ -687,54 +726,157 @@ pub fn start_csi_collect<'a>(
     START_SIGNAL.signal(signal_val);
 }
 
-/// CLI command: `set-collection-mode`
+/// CLI command: `set-csi-output`
 ///
-/// Sets the CSI node collection role stored in [`USER_CONFIG`].
+/// Toggles off-device delivery of captured CSI (`CSINode::set_csi_output_enabled`)
+/// in [`USER_CONFIG`]. Disabling it leaves capture — and therefore the RX path and
+/// its timing — untouched; nothing is decoded, logged, or handed to a callback.
 ///
 /// # Options
-/// - `--mode=collector` — Node actively generates and collects CSI data (default).
-/// - `--mode=listener`  — Node passively receives CSI data only.
+/// - `--enabled=<true|false>` — Deliver captured CSI (default `true`).
 ///
-/// Prints the updated mode after applying the change.
-pub fn set_collection_mode<'a>(
+/// Prints the updated setting after applying the change.
+pub fn set_csi_output<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
     args: &[&str],
     serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
-    let mode = argument_finder(item, args, "mode");
-    match mode {
-        Ok(Some(s)) => match s {
-            "collector" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().collection_mode =
-                    esp_csi_rs::CollectionMode::Collector;
-            }),
-            "listener" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().collection_mode =
-                    esp_csi_rs::CollectionMode::Listener;
-            }),
-            _ => {
-                writeln!(serial, "Invalid mode. Use 'collector' or 'listener'.").unwrap();
+    let mut touched = false;
+
+    if let Ok(Some(s)) = argument_finder(item, args, "enabled") {
+        match parse_on_off(s) {
+            Some(v) => {
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().csi_output_enabled = v;
+                });
+                touched = true;
+            }
+            None => {
+                writeln!(serial, "Invalid --enabled value. Use 'true' or 'false'.").unwrap();
                 return;
             }
-        },
-        _ => {
+        }
+    }
+
+    if !touched {
+        writeln!(
+            serial,
+            "Usage: set-csi-output --enabled=<true|false>"
+        )
+        .unwrap();
+        return;
+    }
+
+    USER_CONFIG.lock(|config| {
+        let cfg = config.borrow();
+        let cfg = cfg.as_ref().unwrap();
+        writeln!(serial, "\nCSI Output: {}", cfg.csi_output_enabled).unwrap();
+    });
+}
+
+/// CLI command: `set-csi-filter`
+///
+/// Restricts which captured frames are delivered, by source MAC and/or PHY class.
+///
+/// A collector is promiscuous by nature — it reports CSI for every frame its radio decodes. On a
+/// busy channel that means the AP's own beacons and ACKs, the association exchange, and any
+/// third-party device on the channel, all mixed in with the traffic the user configured. Those rows
+/// are real CSI, but they read as corrupt: the leading field is the frame's own 802.11 sequence
+/// number (per-transmitter and per-TID, so arbitrary), and a legacy-rate frame yields the shorter
+/// L-LTF-only payload.
+///
+/// Filtering here rather than on the host also buys back console bandwidth: the rejection happens in
+/// the Wi-Fi callback before the packet copy and before any formatting.
+pub fn set_csi_filter<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let mut touched = false;
+
+    if let Ok(Some(s)) = argument_finder(item, args, "peer-mac") {
+        let t = s.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("any") || t.eq_ignore_ascii_case("off") {
+            USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().csi_peer_filter = None;
+            });
+            esp_csi_rs::set_csi_peer_filter([0u8; 6]);
+            touched = true;
+        } else if let Some(mac) = parse_mac(t) {
+            USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().csi_peer_filter = Some(mac);
+            });
+            esp_csi_rs::set_csi_peer_filter(mac);
+            touched = true;
+        } else {
             writeln!(
                 serial,
-                "Usage: set-collection-mode --mode=<collector|listener>"
+                "Invalid --peer-mac value. Use aa:bb:cc:dd:ee:ff, or 'any' to clear."
             )
             .unwrap();
             return;
         }
     }
 
-    USER_CONFIG.lock(|config| {
-        let mode_str = match config.borrow().as_ref().unwrap().collection_mode {
-            esp_csi_rs::CollectionMode::Collector => "Collector",
-            esp_csi_rs::CollectionMode::Listener => "Listener",
+    if let Ok(Some(s)) = argument_finder(item, args, "min-phy") {
+        let t = s.trim();
+        let min = if t.eq_ignore_ascii_case("any") {
+            Some(0u8)
+        } else if t.eq_ignore_ascii_case("ht") {
+            Some(1u8)
+        } else {
+            None
         };
-        writeln!(serial, "\nCollection Mode: {}", mode_str).unwrap();
+        match min {
+            Some(v) => {
+                USER_CONFIG.lock(|config| {
+                    config.borrow_mut().as_mut().unwrap().csi_min_sig_mode = v;
+                });
+                esp_csi_rs::set_csi_min_sig_mode(v);
+                touched = true;
+            }
+            None => {
+                writeln!(serial, "Invalid --min-phy value. Use 'any' or 'ht'.").unwrap();
+                return;
+            }
+        }
+    }
+
+    if !touched {
+        writeln!(
+            serial,
+            "Usage: set-csi-filter [--peer-mac=<aa:bb:cc:dd:ee:ff|any>] [--min-phy=<any|ht>]"
+        )
+        .unwrap();
+        return;
+    }
+
+    USER_CONFIG.lock(|config| {
+        let cfg = config.borrow();
+        let cfg = cfg.as_ref().unwrap();
+        match cfg.csi_peer_filter {
+            Some(m) => writeln!(
+                serial,
+                "\nCSI Peer Filter: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+            .unwrap(),
+            None => writeln!(serial, "\nCSI Peer Filter: any source").unwrap(),
+        }
+        writeln!(
+            serial,
+            "CSI Min PHY: {}",
+            if cfg.csi_min_sig_mode == 0 {
+                "any"
+            } else {
+                "ht (802.11n and better)"
+            }
+        )
+        .unwrap();
     });
 }
 
@@ -804,8 +946,8 @@ pub fn set_log_mode<'a>(
 /// Prints a formatted summary of the current [`USER_CONFIG`] to the serial interface,
 /// grouped into three sections: `[WiFi]`, `[Collection]`, and `[CSI Config]`.
 ///
-/// CSI Config fields are platform-specific: ESP32-C6 exposes HE/STBC fields
-/// while all other targets expose classic LLTF/HTLTF fields.
+/// CSI Config fields are platform-specific: ESP32-C5/C6 expose per-PPDU-format
+/// acquisition flags while all other targets expose classic LLTF/HTLTF fields.
 pub fn show_config<'a>(
     _menu: &Menu<SerialInterface, Context>,
     _item: &Item<SerialInterface, Context>,
@@ -846,26 +988,37 @@ pub fn show_config<'a>(
         match cfg.peer_mac {
             Some(m) => writeln!(
                 serial,
-                "  Peer MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                "  Dst MAC : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 m[0], m[1], m[2], m[3], m[4], m[5]
             )
             .unwrap(),
-            None => writeln!(serial, "  Peer MAC: auto").unwrap(),
+            None => writeln!(serial, "  Dst MAC : broadcast").unwrap(),
         }
         let ht40_str = match cfg.ht40_secondary {
             Some(SecondaryChannel::Above) => "HT40 (secondary above)",
             Some(SecondaryChannel::Below) => "HT40 (secondary below)",
             _ => "HT20/legacy",
         };
-        writeln!(serial, "  TX PHY  : {}", ht40_str).unwrap();
+        writeln!(serial, "  AP 2nd  : {}", ht40_str).unwrap();
 
         // Collection settings
         writeln!(serial, "\n[Collection]").unwrap();
-        let mode_str = match cfg.collection_mode {
-            esp_csi_rs::CollectionMode::Collector => "Collector",
-            esp_csi_rs::CollectionMode::Listener => "Listener",
-        };
-        writeln!(serial, "  Mode          : {}", mode_str).unwrap();
+        writeln!(serial, "  CSI Output    : {}", cfg.csi_output_enabled).unwrap();
+        match cfg.csi_peer_filter {
+            Some(m) => writeln!(
+                serial,
+                "  CSI Peer Filt : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+            .unwrap(),
+            None => writeln!(serial, "  CSI Peer Filt : any source").unwrap(),
+        }
+        writeln!(
+            serial,
+            "  CSI Min PHY   : {}",
+            if cfg.csi_min_sig_mode == 0 { "any" } else { "ht" }
+        )
+        .unwrap();
         writeln!(serial, "  Traffic Freq  : {}Hz", cfg.trigger_freq).unwrap();
         writeln!(serial, "  PHY Rate      : {:?}", cfg.phy_rate).unwrap();
         writeln!(serial, "  Protocol      : {:?}", cfg.protocol).unwrap();
@@ -873,6 +1026,12 @@ pub fn show_config<'a>(
             serial,
             "  IO Tasks      : tx={}, rx={}",
             cfg.io_tasks.tx_enabled, cfg.io_tasks.rx_enabled
+        )
+        .unwrap();
+        writeln!(
+            serial,
+            "  Emitter       : period={}ms",
+            cfg.inject_period_ms
         )
         .unwrap();
 
@@ -990,9 +1149,10 @@ pub fn reset_config<'a>(
 
 /// CLI command: `set-rate`
 ///
-/// Sets the Wi-Fi PHY rate stored in [`USER_CONFIG`]. ESP-NOW central / peripheral
-/// and fast simplex modes apply this; sniffer/station derive their rate from the
-/// surrounding radio configuration.
+/// Records the Wi-Fi PHY rate in [`USER_CONFIG`] for `show-config`. No mode
+/// applies it any more: collectors derive their rate from the surrounding radio
+/// configuration, and an emitter transmits at the rate its forced TX PHY implies. The
+/// ESP-NOW central / peripheral pair DOES apply it, as the per-peer TX PHY.
 ///
 /// # Options
 /// - `--rate=<NAME>` — One of: `mcs0-lgi`, `mcs1-lgi`, `mcs2-lgi`, `mcs3-lgi`,
@@ -1059,9 +1219,8 @@ pub fn set_phy_rate<'a>(
 /// # Options
 /// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`.
 ///
-/// `lr` (Espressif long-range) is the default and suits sniffer / ESP-NOW links
-/// between ESP devices; use `n` when associating to a standard AP in station
-/// mode.
+/// `lr` (Espressif long-range) is the default and suits sniffer links between ESP
+/// devices; use `n` when associating to a standard AP in station mode. Ignored by
 pub fn set_protocol_cmd<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
@@ -1246,6 +1405,7 @@ pub fn set_csi_delivery_cmd<'a>(
 /// chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
 /// protocol=<u32>
 /// mac=<AA:BB:CC:DD:EE:FF>
+/// baud=<u32>
 /// features=<comma-separated-list>
 /// END-INFO
 /// ```
@@ -1253,6 +1413,23 @@ pub fn set_csi_delivery_cmd<'a>(
 /// The `mac` field (protocol >= 2) is the factory eFuse MAC, which is also the
 /// USB `iSerialNumber` on native-USB boards. Host tooling uses it as the stable
 /// device key so a `restart`/re-enumeration re-binds to the same board.
+///
+/// ## `baud` is additive, and the protocol version deliberately does NOT move
+///
+/// The console rate is fixed at build time (see `build.rs`), and a host that opens the port at the
+/// wrong rate reads garbage that looks like a hardware fault rather than a settings mismatch.
+/// Declaring it lets the host confirm the rate from the device's own answer instead of assuming.
+///
+/// Adding the line is not a grammar change: the format is "key=value lines up to `END-INFO`", and a
+/// host parser ends its match with `_ => {}`. Bumping [`CLI_PROTOCOL_VERSION`] for it would be
+/// actively harmful — a host checks the protocol with an exact equality against a constant compiled
+/// into its own binary, so a board reflashed with a higher number would be refused at attach as
+/// needing a reflash. Reserve the bump for a change that actually breaks the grammar. Absent means
+/// `115200`, which is what every build before this one used.
+///
+/// Note the bootstrap limit: `info` can only CONFIRM the baud once a host is already talking at it,
+/// so the release manifest carries the same value per asset for tooling that must pick a rate before
+/// the first byte.
 pub fn cli_info<'a>(
     _menu: &Menu<SerialInterface, Context>,
     _item: &Item<SerialInterface, Context>,
@@ -1309,8 +1486,28 @@ pub fn cli_info<'a>(
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     )
     .unwrap();
+    // Read from the build — nothing at runtime can move it.
+    writeln!(serial, "baud={}", crate::UART_BAUD).unwrap();
     writeln!(serial, "features={}", features).unwrap();
     writeln!(serial, "END-INFO").unwrap();
+}
+
+/// CLI command: `version`
+///
+/// Prints `open <semver>` — the build flavor followed by the crate version.
+///
+/// Host tooling reads the flavor from here rather than probing a
+/// proprietary-only mode string and inspecting the rejection: a positive
+/// statement survives mode renames, and the proprietary build answers
+/// `pro <semver>` from the same command.
+pub fn version_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    _item: &Item<SerialInterface, Context>,
+    _args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    writeln!(serial, "open {}", env!("CARGO_PKG_VERSION")).unwrap();
 }
 
 /// CLI command: `restart`
@@ -1353,8 +1550,8 @@ pub fn restart_cmd<'a>(
 /// CLI command: `show-stats` (compiled in only with the `statistics` feature)
 ///
 /// Reads the runtime CSI/traffic counters exposed by `esp-csi-rs` and prints
-/// a one-shot snapshot. These counters are accumulated by the WiFi callback
-/// and the ESP-NOW TX path; they are most meaningful while a collection is
+/// a one-shot snapshot. These counters are accumulated by the WiFi callback and
+/// the traffic-generation path; they are most meaningful while a collection is
 /// running, but they remain queryable between runs (the values reset on the
 /// start of each new `start`).
 #[cfg(feature = "statistics")]
@@ -1373,13 +1570,5 @@ pub fn show_stats<'a>(
     writeln!(serial, "  RX Rate (Hz)     : {}", get_rx_rate_hz()).unwrap();
     writeln!(serial, "  TX Rate (Hz)     : {}", get_tx_rate_hz()).unwrap();
     writeln!(serial, "  RX Dropped Pkts  : {}", get_dropped_packets_rx()).unwrap();
-    writeln!(serial, "  TX Queued Pkts   : {}", get_tx_queued_packets()).unwrap();
-    writeln!(
-        serial,
-        "  TX Confirmed Pkts: {}",
-        get_tx_confirmed_packets()
-    )
-    .unwrap();
-    writeln!(serial, "  TX Failed Pkts   : {}", get_tx_failed_packets()).unwrap();
     writeln!(serial, "================================\n").unwrap();
 }

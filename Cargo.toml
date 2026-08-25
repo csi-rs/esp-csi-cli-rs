@@ -2,6 +2,11 @@
 name = "esp-csi-cli-rs"
 version = "0.7.0"
 edition = "2024"
+# This crate is firmware, not a library or a host application: the build product
+# is an image flashed to an ESP32, so there is nothing for a crates.io consumer
+# to depend on. It ships as source plus a git tag. The library it drives,
+# `esp-csi-rs`, is the published artifact.
+publish = false
 
 [features]
 default = ["no-std", "println", "auto", "statistics"]
@@ -105,7 +110,7 @@ embassy-time = { version = "0.5.1" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { version = "0.9", default-features = false }
+esp-csi-rs = { version = "0.10.1", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint

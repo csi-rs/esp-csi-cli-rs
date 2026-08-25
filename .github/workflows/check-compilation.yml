@@ -55,12 +55,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Pinned rather than floating, so a toolchain release cannot break CI on its
+      # own. The floor is set by the dependency graph, not by preference:
+      # `esp-rom-sys 0.1.5` and `esp-metadata-generated 0.5.0` both declare
+      # `rust-version = 1.95.0`, so 1.93.0.0 fails resolution outright — before
+      # compiling anything, and identically with and without `defmt`. 1.95.0.0 is
+      # the version this firmware is built and hardware-tested against locally.
+      # Raise this in step with the `esp-hal` / `esp-radio` bumps.
       - name: Install ESP Rust toolchain
         uses: esp-rs/xtensa-toolchain@v1.6.0
         with:
           default: false
           buildtargets: ${{ matrix.chip.feature }}
-          version: 1.93.0.0
+          version: 1.95.0.0
         env:
           RUSTUP_PERMIT_COPY_RENAME: 1
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}

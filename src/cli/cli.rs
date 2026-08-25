@@ -37,10 +37,11 @@ pub fn enter_root(
             "Available Commands:
     set-wifi                Configure WiFi settings (e.g., mode).
     set-traffic             Configure traffic-related parameters (e.g. interval).
-    set-collection-mode     Set the CSI node collection mode (collector or listener).
+    set-csi-output          Toggle off-device delivery of captured CSI (true|false).
+    set-csi-filter          Restrict delivered CSI by source MAC and/or PHY class.
     set-log-mode            Set the CSI output logging format (text, array-list, serialized).
     set-csi                 Configure CSI feature flags (e.g., LLTF, HTLTF).
-    set-rate                Pin the Wi-Fi PHY rate (ESP-NOW modes only).
+    set-rate                Record the Wi-Fi PHY rate (reporting only).
     set-io-tasks            Toggle TX and/or RX direction tasks.
     set-csi-delivery        Switch CSI delivery mode and inline log gate.
     start                   Start the CSI collection process with a defined duration.
@@ -48,6 +49,7 @@ pub fn enter_root(
     show-stats              Print runtime CSI / traffic counters (statistics feature).
     reset-config            Reset all configurations to their default values.
     restart                 Reboot the device via a clean software reset.
+    version                 Print the build flavor and firmware version.
     info                    Print firmware identification metadata.
     help                    Display this help menu or details for a specific command.
 
