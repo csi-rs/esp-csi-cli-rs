@@ -40,9 +40,12 @@ drifting silently.
 - **`show-stats` drops the ESP-NOW TX queued / confirmed / failed counters.**
 - `CLI_PROTOCOL_VERSION` stays at **2** — the `info` grammar is unchanged; only
   the command and mode vocabulary moved.
-- **Dependencies** — requires `esp-csi-rs 0.10`, which absorbed the engine that
+- **Dependencies** — requires `esp-csi-rs 0.10.1`, which absorbed the engine that
   briefly lived in `esp-csi-rs-core`. It resolves straight from crates.io; no
-  `[patch.crates-io]` entry is needed to build this firmware.
+  `[patch.crates-io]` entry is needed to build this firmware. The floor is 0.10.1
+  rather than 0.10 deliberately: 0.10.0 fails to compile for
+  `--features esp32,async-print`, so allowing cargo to resolve it would leave that
+  build broken for anyone starting from a clean checkout.
 
 - **Migrated to `esp-csi-rs 0.9`** (open facade over `esp-csi-rs-core`).
 
