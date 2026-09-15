@@ -444,11 +444,15 @@ pub fn set_wifi<'a>(
                         config.borrow_mut().as_mut().unwrap().node_mode =
                             NodeMode::EspNowPeripheral;
                     }),
-                    "esp-now-fast-collector" => USER_CONFIG.lock(|config| {
+                    // Two spellings for each simplex end. The `-fast-` strings are the
+                    // cross-repo serial contract and keep working; the `-simplex-` ones match the
+                    // node model, where the end that floods is the central and the receive-only
+                    // end is the peripheral.
+                    "esp-now-fast-collector" | "esp-now-simplex-peer" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode =
                             NodeMode::EspNowFastCollector;
                     }),
-                    "esp-now-fast-source" => USER_CONFIG.lock(|config| {
+                    "esp-now-fast-source" | "esp-now-simplex-source" => USER_CONFIG.lock(|config| {
                         config.borrow_mut().as_mut().unwrap().node_mode =
                             NodeMode::EspNowFastSource;
                     }),

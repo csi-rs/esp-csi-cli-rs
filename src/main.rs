@@ -62,8 +62,8 @@ use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CentralOpMode, CollectorMode, CsiDeliveryMode, EmitterConfig,
-    EspNowConfig, HtBandwidth, NodeHardware, NodeRole, PeripheralOpMode, WifiApConfig,
+    CSINode, CSINodeClient, CsiDeliveryMode, EmitterConfig, EspNowConfig, HtBandwidth,
+    NetworkRole, NodeHardware, OperationalMode, SimplexConfig, WifiApConfig,
     WifiSnifferConfig, WifiStationConfig, clear_csi_callback, set_csi_delivery_mode,
     set_csi_logging_enabled, set_csi_raw_callback,
 };
@@ -705,14 +705,16 @@ async fn csi_collection(
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
 
-        // Map NodeMode → a node role. The configured channel and the per-mode
-        // builders flow through here so a user who sets
-        // `set-wifi --set-channel=6` then `start`s gets channel 6 applied even
-        // though set_channel is not called on the running node.
-        let role = match user_config.node_mode {
-            NodeMode::WifiSniffer => NodeRole::Collector(CollectorMode::Sniffer(
+        // Map NodeMode → an operational mode. The configured channel and the per-mode builders
+        // flow through here so a user who sets `set-wifi --set-channel=6` then `start`s gets
+        // channel 6 applied even though set_channel is not called on the running node.
+        //
+        // The network role and collection mode are carried by each mode's config rather than
+        // chosen here, and every mode the CLI exposes takes their defaults.
+        let mode = match user_config.node_mode {
+            NodeMode::WifiSniffer => OperationalMode::Sniffer(
                 WifiSnifferConfig::default().with_channel(user_config.channel),
-            )),
+            ),
             NodeMode::WifiStation => {
                 let auth = if user_config.sta_password.is_empty() {
                     AuthenticationMethod::None
@@ -729,13 +731,13 @@ async fn csi_collection(
                 // The hint pins the C5's radio band, so it has to be the target AP's
                 // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
                 // default therefore makes a 2.4 GHz AP invisible unless overridden.
-                NodeRole::Collector(CollectorMode::Station(
+                OperationalMode::Station(
                     WifiStationConfig::new(client_config).with_channel_hint(user_config.channel),
-                ))
+                )
             }
-            NodeMode::WifiAccessPoint => NodeRole::Collector(CollectorMode::AccessPoint(
-                build_wifi_ap_config(&user_config),
-            )),
+            NodeMode::WifiAccessPoint => {
+                OperationalMode::AccessPoint(build_wifi_ap_config(&user_config))
+            }
             NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
                 let bandwidth = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
                     HtBandwidth::Ht40Above
@@ -752,24 +754,26 @@ async fn csi_collection(
                 if !user_config.emitter_use_sta_if {
                     emitter = emitter.with_ap_interface();
                 }
-                NodeRole::Emitter(emitter)
+                OperationalMode::Emitter(emitter)
             }
-            // The ESP-NOW pair predates the emitter/collector split and keeps the central /
-            // peripheral spelling, which is what the engine still models it as. The Wi-Fi modes
-            // above stay on the collector spelling — nothing about ESP-NOW changes what a sniffer
-            // or a softAP is.
-            NodeMode::EspNowCentral => {
-                NodeRole::Central(CentralOpMode::EspNow(build_espnow_config(&user_config)))
-            }
-            NodeMode::EspNowPeripheral => {
-                NodeRole::Peripheral(PeripheralOpMode::EspNow(build_espnow_config(&user_config)))
-            }
-            NodeMode::EspNowFastCollector => NodeRole::Central(CentralOpMode::EspNowFastCollector(
+            // ESP-NOW is one operational mode with two ends; the network role selects which.
+            NodeMode::EspNowCentral => OperationalMode::EspNow(
+                build_espnow_config(&user_config).with_network_role(NetworkRole::Central),
+            ),
+            NodeMode::EspNowPeripheral => OperationalMode::EspNow(
+                build_espnow_config(&user_config).with_network_role(NetworkRole::Peripheral),
+            ),
+            // The simplex ends changed sides in esp-csi-rs 0.11: the end that floods sources the
+            // traffic and is therefore the central, and the end that beacons and then only
+            // receives is the peripheral. The `--mode` strings are unchanged — they are the
+            // cross-repo serial contract, and `esp-now-fast-collector` still names the collector
+            // correctly — with the model spellings accepted as aliases.
+            NodeMode::EspNowFastCollector => OperationalMode::EspNowSimplex(SimplexConfig::peer(
+                user_config.channel,
+            )),
+            NodeMode::EspNowFastSource => OperationalMode::EspNowSimplex(SimplexConfig::source(
                 build_espnow_fast_config(&user_config),
             )),
-            NodeMode::EspNowFastSource => NodeRole::Peripheral(
-                PeripheralOpMode::EspNowFastSource(build_espnow_fast_config(&user_config)),
-            ),
         };
 
         // Throughput-oriented modes disable Wi-Fi power saving (matches esp-csi-rs examples).
@@ -792,10 +796,13 @@ async fn csi_collection(
 
         // Build hardware handle and construct the CSI node
         let hardware = NodeHardware::new(&mut interfaces, controller);
-        let mut node = CSINode::new(role, Some(user_config.csi_config), traffic_freq, hardware);
+        let mut node = CSINode::new(mode, Some(user_config.csi_config), traffic_freq, hardware);
         // CSI delivery gate: `false` keeps capture (and its timing) running but
         // decodes/logs nothing. No effect on an emitter, which captures nothing.
-        node.set_csi_output_enabled(user_config.csi_output_enabled);
+        // The free function, not the node method: the method wrote a flag no CSI path read, so
+        // `set-csi-output --enabled=false` reported success and kept delivering. This one closes
+        // the publish gate.
+        esp_csi_rs::set_csi_output_enabled(user_config.csi_output_enabled);
         // Re-apply the attribution filters every run. Both live in process-wide statics in
         // esp-csi-rs, and `reset-config` only rewrites `UserConfig` — so without this a filter
         // cleared in the config would stay latched in the radio callback and silently keep dropping
