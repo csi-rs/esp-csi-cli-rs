@@ -143,9 +143,20 @@ pub struct UserConfig {
     /// callback. Intended for CPU-cost benchmarking — no CSI data is delivered
     /// or logged in this mode. Set via `set-csi-delivery --mode=raw`.
     pub delivery_raw: bool,
-    /// Delay in milliseconds between injected frames for the emitter modes.
-    /// Default `20` ms ≈ 50 frames/s. Set via `set-wifi --inject-period-ms=<ms>`.
-    pub inject_period_ms: u32,
+    /// Delay in **microseconds** between injected frames for the emitter modes.
+    /// Default `20_000` µs ≈ 50 frames/s.
+    ///
+    /// Microseconds rather than milliseconds because integer ms only expresses `1000/n` Hz, and the
+    /// gaps are widest exactly where the interesting rates are: 150 Hz becomes 167 (+11%), 300
+    /// becomes 333 (+11%), 400 becomes 500 (+25%), 700 becomes 1000 (+43%). Above roughly 250 Hz
+    /// the control is effectively gone. The emitter loop already sleeps on an embassy `Duration`,
+    /// which carries µs, so the resolution was being discarded at the flag rather than in the
+    /// timing.
+    ///
+    /// Set via `set-wifi --inject-period-us=<us>`. `--inject-period-ms=<ms>` still works and
+    /// multiplies by 1000, so a host that only knows the old flag keeps its old behaviour; within
+    /// one `set-wifi` the µs flag is applied second and wins.
+    pub inject_period_us: u32,
     /// Interface an emitter injects on: `true` = STA, `false` = AP. Raw injection
     /// is accepted on either, but which one actually radiates is chip-dependent,
     /// so this is exposed rather than hard-coded.
@@ -181,7 +192,7 @@ impl core::fmt::Debug for UserConfig {
             .field("peer_mac", &self.peer_mac)
             .field("ht40_secondary", &ht40_str)
             .field("delivery_raw", &self.delivery_raw)
-            .field("inject_period_ms", &self.inject_period_ms)
+            .field("inject_period_us", &self.inject_period_us)
             .field("emitter_use_sta_if", &self.emitter_use_sta_if)
             .finish()
     }
@@ -237,7 +248,7 @@ impl UserConfig {
             peer_mac: None,
             ht40_secondary: None,
             delivery_raw: false,
-            inject_period_ms: 20,
+            inject_period_us: 20_000,
             emitter_use_sta_if: true,
         }
     }

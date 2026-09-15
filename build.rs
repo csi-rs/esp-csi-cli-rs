@@ -60,27 +60,25 @@ fn emit_uart_baud() {
 fn main() {
     emit_uart_baud();
 
-    // Warn when `defmt` and `async-print` are enabled together. The two cannot
-    // be combined: esp-csi-rs's `defmt` feature always pulls in esp-println's
-    // `defmt-espflash` global logger, while its async-print path registers a
-    // second `#[defmt::global_logger]` — so the build fails to link with
-    // `_defmt_acquire` multiply defined. Because `jtag-serial` forces
-    // `async-print`, this also rules out `defmt` + `jtag-serial`.
+    // `defmt` needs the `-Tdefmt.x` linker script. Cargo does not propagate linker arguments from
+    // a dependency's build script, so `esp-csi-rs` adding it for itself does nothing for this
+    // binary — the flag has to come from this crate's own build, and the `*-defmt` cargo aliases
+    // supply it via `--config target.<triple>.rustflags`.
     //
-    // Surfaced here as a readable warning ahead of the otherwise cryptic
-    // linker error. For the fastest non-blocking collection, use
-    // `jtag-serial` (async-print on) with the `serialized` log mode instead of
-    // `defmt`.
-    if std::env::var_os("CARGO_FEATURE_DEFMT").is_some()
-        && std::env::var_os("CARGO_FEATURE_ASYNC_PRINT").is_some()
-    {
+    // Without it the link fails on `undefined symbol: _defmt_panic` / `_defmt_timestamp`, which
+    // reads like missing application code rather than a missing linker script. This warning names
+    // the actual cause.
+    //
+    // This block previously warned that `defmt` and `async-print` could not be combined, claiming
+    // two `#[defmt::global_logger]`s and `_defmt_acquire` multiply defined, and that this ruled out
+    // `defmt` + `jtag-serial`. None of that is true: there is one global logger, in `esp-csi-rs`,
+    // and every transport links with `defmt`. Verified on the ESP32-C6 for `auto`, `uart` and
+    // `jtag-serial`. The warning was emitted on builds that then succeeded.
+    if std::env::var_os("CARGO_FEATURE_DEFMT").is_some() {
         println!(
-            "cargo:warning=`defmt` + `async-print` are not supported together \
-             (duplicate defmt global_logger -> `_defmt_acquire` multiply defined; \
-             this also rules out `defmt` + `jtag-serial`, which forces async-print). \
-             For the most optimal non-blocking collection setup, build with \
-             `jtag-serial` (enables async-print) and select the `serialized` log \
-             mode at runtime (`set-log-mode --mode=serialized`)."
+            "cargo:warning=`defmt` requires the `-Tdefmt.x` linker script. Build with a `*-defmt` \
+             cargo alias (e.g. `cargo esp32c6-defmt`), which adds it; a plain `cargo build \
+             --features=defmt` will fail to link with undefined `_defmt_panic` / `_defmt_timestamp`."
         );
     }
 }

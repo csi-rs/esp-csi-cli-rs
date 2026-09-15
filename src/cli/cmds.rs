@@ -594,15 +594,33 @@ pub fn set_wifi<'a>(
             _ => writeln!(serial, "Invalid --ht40 (use above|below|none)").unwrap(),
         }
     }
-    // Emitter inter-frame period; the HT20/HT40 emitters' only rate control.
+    // Emitter inter-frame period; the emitters' only rate control.
+    //
+    // Both flags write the SAME µs field, and the ms one is handled FIRST, so a host that sends
+    // both in one `set-wifi` ends up with the µs value. That ordering is the compatibility story:
+    // a host that only knows `--inject-period-ms` keeps its old behaviour exactly, and one that
+    // knows both can send ms as a fallback for older firmware without it overriding the precise
+    // value.
     if let Ok(Some(s)) = argument_finder(item, args, "inject-period-ms") {
         match s.parse::<u32>() {
             Ok(ms) if ms > 0 => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().inject_period_ms = ms;
+                config.borrow_mut().as_mut().unwrap().inject_period_us = ms.saturating_mul(1000);
             }),
             _ => writeln!(
                 serial,
                 "Invalid --inject-period-ms (use a positive integer)"
+            )
+            .unwrap(),
+        }
+    }
+    if let Ok(Some(s)) = argument_finder(item, args, "inject-period-us") {
+        match s.parse::<u32>() {
+            Ok(us) if us > 0 => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().inject_period_us = us;
+            }),
+            _ => writeln!(
+                serial,
+                "Invalid --inject-period-us (use a positive integer)"
             )
             .unwrap(),
         }
@@ -679,7 +697,7 @@ pub fn set_wifi<'a>(
             _ => "HT20/legacy",
         };
         writeln!(serial, "Secondary Channel: {}", ht40_str).unwrap();
-        writeln!(serial, "Emitter Period: {}ms", cfg.inject_period_ms).unwrap();
+        writeln!(serial, "Emitter Period: {}us", cfg.inject_period_us).unwrap();
     });
 }
 
@@ -1034,8 +1052,8 @@ pub fn show_config<'a>(
         .unwrap();
         writeln!(
             serial,
-            "  Emitter       : period={}ms",
-            cfg.inject_period_ms
+            "  Emitter       : period={}us",
+            cfg.inject_period_us
         )
         .unwrap();
 
@@ -1409,6 +1427,8 @@ pub fn set_csi_delivery_cmd<'a>(
 /// chip=<esp32|esp32c3|esp32c5|esp32c6|esp32s3|unknown>
 /// protocol=<u32>
 /// mac=<AA:BB:CC:DD:EE:FF>
+/// log=<text|defmt>
+/// transport=<uart|jtag|auto>
 /// baud=<u32>
 /// features=<comma-separated-list>
 /// END-INFO
@@ -1491,6 +1511,31 @@ pub fn cli_info<'a>(
     )
     .unwrap();
     // Read from the build — nothing at runtime can move it.
+    // What the log frames ARE. Read from the build, not from a runtime setting, because it is the
+    // build that decides: `defmt` interns its format strings at compile time.
+    //
+    // This line exists because a defmt build emits BINARY frames on the same serial line a host
+    // parses as CSI text, and the host has no other way to tell — the bytes are not
+    // self-describing, and a defmt stream fed to a text parser produces garbage rows that look
+    // like a hardware fault rather than a decoder mismatch. Declaring the encoding here lets the
+    // host pick its decoder from the device's own answer.
+    let log = if cfg!(feature = "defmt") { "defmt" } else { "text" };
+    // Which wire they leave on. `auto` is a real answer, not a missing one: the board wires both
+    // consoles and writes to whichever has a host attached, so naming one would be a guess the
+    // host might act on.
+    let transport = if cfg!(feature = "jtag-serial") {
+        "jtag"
+    } else if cfg!(feature = "uart") {
+        "uart"
+    } else if cfg!(feature = "esp32") {
+        // No USB-Serial-JTAG peripheral on this part: there is exactly one wire, and `auto` would
+        // be a lie.
+        "uart"
+    } else {
+        "auto"
+    };
+    writeln!(serial, "log={}", log).unwrap();
+    writeln!(serial, "transport={}", transport).unwrap();
     writeln!(serial, "baud={}", crate::UART_BAUD).unwrap();
     writeln!(serial, "features={}", features).unwrap();
     writeln!(serial, "END-INFO").unwrap();

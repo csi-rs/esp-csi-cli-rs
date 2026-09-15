@@ -747,7 +747,7 @@ async fn csi_collection(
                 // `--peer-mac` is the injection destination here (default broadcast); in the
                 // ESP-NOW modes below the same field is the explicit pairing address instead.
                 let mut emitter = EmitterConfig::new(user_config.channel, bandwidth)
-                    .with_period(Duration::from_millis(user_config.inject_period_ms as u64));
+                    .with_period(Duration::from_micros(user_config.inject_period_us as u64));
                 if let Some(mac) = user_config.peer_mac {
                     emitter = emitter.with_dst_mac(mac);
                 }

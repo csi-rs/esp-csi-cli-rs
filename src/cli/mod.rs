@@ -405,7 +405,16 @@ configurations on or off."),
                     Parameter::NamedValue {
                         parameter_name: "inject-period-ms",
                         argument_name: "injectperiodms",
-                        help: Some("Emitter inter-frame period in ms (default 20)"),
+                        help: Some("Emitter inter-frame period in ms (coarse; see --inject-period-us)"),
+                    },
+                    // Declared here as well as parsed in `cmds.rs`. The `menu` crate rejects any
+                    // flag it was not told about — `Error: Did not understand "--inject-period-us"`
+                    // — so the `argument_finder` call on its own reads as working code and
+                    // silently never fires.
+                    Parameter::NamedValue {
+                        parameter_name: "inject-period-us",
+                        argument_name: "injectperiodus",
+                        help: Some("Emitter inter-frame period in us (preferred; whole ms cannot express most rates)"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "emitter-iface",
@@ -460,6 +469,9 @@ Options:
                                                                 HT40 (default: none = HT20). Does NOT select emitter
                                                                 bandwidth -- use --mode=ht40-emitter for that.
   --inject-period-ms=<NUMBER>                                   Emitter modes: delay between injected frames in ms
+                                                                (coarse — whole ms cannot express most rates)
+  --inject-period-us=<NUMBER>                                   Emitter modes: delay between injected frames in us
+                                                                (preferred; applied after the ms flag, so it wins)
                                                                 (default: 20 ~= 50 frames/s).
   --emitter-iface=<sta|ap>                                      Emitter modes: which interface injects (default: sta).
 
