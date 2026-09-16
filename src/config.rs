@@ -59,6 +59,17 @@ pub struct UserConfig {
     /// captures — RX path and timing unchanged — but nothing is decoded or logged
     /// (`CSINode::set_csi_output_enabled`). Set via `set-csi-output --enabled=`.
     pub csi_output_enabled: bool,
+    /// The node's **collection mode** — whether its measurements leave it. `false` is
+    /// `CollectionMode::Listener`: it captures and reports nothing.
+    ///
+    /// Distinct from `csi_output_enabled`, which is the *runtime* delivery gate. This one is part
+    /// of the node's configuration and, on the ESP-NOW modes, is announced on the wire
+    /// (`ControlPacket::is_collector`) so a peripheral paired with a listening central promotes
+    /// itself. Set via `set-wifi --collection=collector|listener`.
+    ///
+    /// Only the modes that admit a choice read it — a sniffer is always a collector and an emitter
+    /// always a listener, so the setting is ignored there rather than silently believed.
+    pub collection_collector: bool,
     /// Restrict delivered CSI to this source MAC. `None` = accept every source.
     ///
     /// A collector is promiscuous: it reports CSI for the AP's beacons and ACKs and for any
@@ -173,6 +184,7 @@ impl core::fmt::Debug for UserConfig {
         f.debug_struct("UserConfig")
             .field("node_mode", &self.node_mode)
             .field("csi_output_enabled", &self.csi_output_enabled)
+            .field("collection_collector", &self.collection_collector)
             .field("csi_peer_filter", &self.csi_peer_filter)
             .field("csi_min_sig_mode", &self.csi_min_sig_mode)
             .field("trigger_freq", &self.trigger_freq)
@@ -225,6 +237,7 @@ impl UserConfig {
         UserConfig {
             node_mode: NodeMode::WifiSniffer,
             csi_output_enabled: true,
+            collection_collector: true,
             csi_peer_filter: None,
             csi_min_sig_mode: 0,
             trigger_freq: 100,

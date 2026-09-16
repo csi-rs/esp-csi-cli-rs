@@ -613,6 +613,20 @@ pub fn set_wifi<'a>(
             .unwrap(),
         }
     }
+    // The node's collection mode — whether its measurements leave it. Only the modes that admit a
+    // choice read it; on the ESP-NOW modes it also goes on the wire, so a peripheral paired with a
+    // listening central can promote itself.
+    if let Ok(Some(v)) = argument_finder(item, args, "collection") {
+        match v.to_ascii_lowercase().as_str() {
+            "collector" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().collection_collector = true;
+            }),
+            "listener" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().collection_collector = false;
+            }),
+            _ => writeln!(serial, "Invalid --collection (use collector|listener)").unwrap(),
+        }
+    }
     if let Ok(Some(s)) = argument_finder(item, args, "inject-period-us") {
         match s.parse::<u32>() {
             Ok(us) if us > 0 => USER_CONFIG.lock(|config| {

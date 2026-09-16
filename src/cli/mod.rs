@@ -412,6 +412,11 @@ configurations on or off."),
                     // — so the `argument_finder` call on its own reads as working code and
                     // silently never fires.
                     Parameter::NamedValue {
+                        parameter_name: "collection",
+                        argument_name: "collection",
+                        help: Some("collector|listener — whether this node's CSI leaves it"),
+                    },
+                    Parameter::NamedValue {
                         parameter_name: "inject-period-us",
                         argument_name: "injectperiodus",
                         help: Some("Emitter inter-frame period in us (preferred; whole ms cannot express most rates)"),

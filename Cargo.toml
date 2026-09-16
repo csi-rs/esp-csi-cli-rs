@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # This crate is firmware, not a library or a host application: the build product
 # is an image flashed to an ESP32, so there is nothing for a crates.io consumer

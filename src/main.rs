@@ -705,6 +705,14 @@ async fn csi_collection(
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
 
+        // The collection mode the user asked for. Only the modes that admit a choice take it;
+        // where a mode fixes the attribute there is no setter to hand it to.
+        let collection_mode = if user_config.collection_collector {
+            esp_csi_rs::CollectionMode::Collector
+        } else {
+            esp_csi_rs::CollectionMode::Listener
+        };
+
         // Map NodeMode → an operational mode. The configured channel and the per-mode builders
         // flow through here so a user who sets `set-wifi --set-channel=6` then `start`s gets
         // channel 6 applied even though set_channel is not called on the running node.
@@ -732,12 +740,14 @@ async fn csi_collection(
                 // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
                 // default therefore makes a 2.4 GHz AP invisible unless overridden.
                 OperationalMode::Station(
-                    WifiStationConfig::new(client_config).with_channel_hint(user_config.channel),
+                    WifiStationConfig::new(client_config)
+                        .with_channel_hint(user_config.channel)
+                        .with_collection_mode(collection_mode),
                 )
             }
-            NodeMode::WifiAccessPoint => {
-                OperationalMode::AccessPoint(build_wifi_ap_config(&user_config))
-            }
+            NodeMode::WifiAccessPoint => OperationalMode::AccessPoint(
+                build_wifi_ap_config(&user_config).with_collection_mode(collection_mode),
+            ),
             NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
                 let bandwidth = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
                     HtBandwidth::Ht40Above
@@ -758,10 +768,14 @@ async fn csi_collection(
             }
             // ESP-NOW is one operational mode with two ends; the network role selects which.
             NodeMode::EspNowCentral => OperationalMode::EspNow(
-                build_espnow_config(&user_config).with_network_role(NetworkRole::Central),
+                build_espnow_config(&user_config)
+                    .with_network_role(NetworkRole::Central)
+                    .with_collection_mode(collection_mode),
             ),
             NodeMode::EspNowPeripheral => OperationalMode::EspNow(
-                build_espnow_config(&user_config).with_network_role(NetworkRole::Peripheral),
+                build_espnow_config(&user_config)
+                    .with_network_role(NetworkRole::Peripheral)
+                    .with_collection_mode(collection_mode),
             ),
             // The simplex ends changed sides in esp-csi-rs 0.11: the end that floods sources the
             // traffic and is therefore the central, and the end that beacons and then only
