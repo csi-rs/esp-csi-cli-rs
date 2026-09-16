@@ -85,6 +85,14 @@ This is a list of commands available through the CLI interface:
     * Description: Configure WiFi and network settings. **Note:** SSIDs/passwords with spaces should be wrapped in single or double quotes (e.g. `--sta-ssid='My Network'` or `--sta-ssid="My Network"`). Both quote styles are interchangeable. Underscores (`_`) are passed through literally.
     * Options:
         * `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-source|esp-now-fast-collector>`: the node's operational mode — how it reaches the channel (default: `sniffer`). The two simplex ends are also spelled `esp-now-simplex-source` and `esp-now-simplex-peer`; the `-fast-` names remain the wire contract.
+        * `--collection=<collector|listener>`: the node's **collection mode** — whether its
+          measurements leave it (default: `collector`). A listener captures and reports nothing.
+          This is not `set-csi-output`, which is a runtime delivery gate: on the ESP-NOW modes the
+          collection mode also goes out on the wire, which is what lets a peripheral paired with a
+          listening central promote itself. Only the modes that admit a choice read it —
+          `station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`. A sniffer is always a
+          collector, an emitter always a listener, and each simplex end is fixed by which end it
+          is, so the flag is ignored there rather than silently believed.
         * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
         * `--sta-password=<PASSWORD>`: Set the password for Station mode.
         * `--ap-ssid=<SSID>`: Set the SSID for wifi-ap mode (default: `esp-csi-ap`).
