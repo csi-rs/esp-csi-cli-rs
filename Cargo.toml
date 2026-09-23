@@ -145,6 +145,3 @@ opt-level = 3
 overflow-checks = false
 [profile.release.package."*"]
 opt-level = 3
-# esp-csi-rs 0.11 (the node model) is not on crates.io yet. Drop this once it publishes.
-[patch.crates-io]
-esp-csi-rs = { path = "../esp-csi-rs" }

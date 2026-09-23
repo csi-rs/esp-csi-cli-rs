@@ -111,9 +111,7 @@ with the webserver, web client and desktop GUI.
 
 ### Dependencies
 
-- Requires **esp-csi-rs 0.11**. Until 0.11 is on crates.io the build resolves it
-  through the `[patch.crates-io]` path entry in `Cargo.toml`
-  (`esp-csi-rs = { path = "../esp-csi-rs" }`), which is dropped once it publishes.
+- Requires **esp-csi-rs 0.11**, from crates.io.
 
 ## v0.7.0
 
