@@ -15,8 +15,10 @@ does. Supported devices: ESP32, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S3.
 ## The node model
 
 `set-wifi --mode=` selects the node's **operational mode** — how it reaches the channel. It is one
-of four independent attributes describing a node; the other three (network role, collection mode,
-session role) come with the mode, because which values a mode admits depends on the mode.
+of four independent attributes describing a node. The network role comes with the mode (the
+`--mode` string names the end), and the collection mode is set with `set-wifi --collection=collector|listener`
+on the modes that admit a choice (`station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`); the
+others fix it. Every node is a session responder: the host starts and stops the run.
 
 | Mode | Reaches the channel by |
 |---|---|

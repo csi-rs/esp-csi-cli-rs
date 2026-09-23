@@ -120,11 +120,11 @@ pub struct UserConfig {
     /// station mode on ESP32-C5 this is also passed as the band-selection hint
     /// (`WifiStationConfig::channel_hint`) before association.
     pub channel: u8,
-    /// Wi-Fi PHY rate. Applied to the per-peer TX PHY of the ESP-NOW central /
-    /// peripheral pair (`EspNowConfig::with_phy_rate`). Ignored elsewhere: the Wi-Fi
-    /// collector modes derive their rate from the AP / radio configuration, an
-    /// emitter transmits at the rate its forced TX PHY implies, and the fast simplex
-    /// pair takes its rate from `EspNowConfig::fast_default()`.
+    /// Wi-Fi PHY rate. Reporting only, except on the ESP-NOW pair: applied to the
+    /// per-peer TX PHY of the ESP-NOW central / peripheral (`EspNowConfig::with_phy_rate`).
+    /// Ignored elsewhere: station, sniffer and softAP take their rate from the AP / radio
+    /// configuration, an emitter transmits at the rate its forced TX PHY implies, and the
+    /// simplex source takes its rate from `EspNowConfig::fast_default()`.
     pub phy_rate: WifiPhyRate,
     /// Wi-Fi PHY protocol applied to the node before a collection run
     /// (`CSINode::set_protocol`). Set via `set-protocol --protocol=<...>`.
@@ -145,7 +145,7 @@ pub struct UserConfig {
     ///   automatic magic-prefix pairing; `Some` drops the magic prefix and filters on
     ///   source MAC instead, so BOTH nodes must be configured with the other's address.
     pub peer_mac: Option<[u8; 6]>,
-    /// Secondary channel. For the softAP collector, `Some(Above|Below)` runs the AP
+    /// Secondary channel. For the softAP, `Some(Above|Below)` runs the AP
     /// as HT40 and `None` keeps it at HT20. For the ESP-NOW modes it forces the
     /// per-peer TX PHY to HT40 (`EspNowConfig::with_ht40`). It does **not** select
     /// emitter bandwidth — that is `--mode=ht40-emitter`.

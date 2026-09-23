@@ -1282,7 +1282,7 @@ pub fn set_phy_rate<'a>(
 /// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`.
 ///
 /// `lr` (Espressif long-range) is the default and suits sniffer links between ESP
-/// devices; use `n` when associating to a standard AP in station mode. Ignored by
+/// devices; use `n` when associating to a standard AP in station mode.
 pub fn set_protocol_cmd<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
