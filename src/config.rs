@@ -53,11 +53,12 @@ pub static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 /// [`csi_collection`] task at the start of each collection run.
 #[derive(Clone)]
 pub struct UserConfig {
-    /// WiFi/radio operating mode (sniffer, station, softAP, HT emitter, ESP-NOW central/peripheral).
+    /// Operational mode (sniffer, station, softAP, emitter, ESP-NOW, ESP-NOW simplex), with the
+    /// network role where the mode has two ends.
     pub node_mode: NodeMode,
     /// Whether captured CSI is delivered off-device. When `false` the radio still
     /// captures — RX path and timing unchanged — but nothing is decoded or logged
-    /// (`CSINode::set_csi_output_enabled`). Set via `set-csi-output --enabled=`.
+    /// (`esp_csi_rs::set_csi_output_enabled`). Set via `set-csi-output --enabled=`.
     pub csi_output_enabled: bool,
     /// The node's **collection mode** — whether its measurements leave it. `false` is
     /// `CollectionMode::Listener`: it captures and reports nothing.

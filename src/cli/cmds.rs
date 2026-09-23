@@ -129,6 +129,21 @@ fn parse_on_off(s: &str) -> Option<bool> {
     }
 }
 
+/// The collection mode the next run will use, as printed by `show-config` and `set-wifi`.
+///
+/// Only ESP-NOW, station and access point read `--collection`; every other mode fixes the
+/// attribute, so the fixed value is shown rather than a setting the mode ignores.
+fn collection_mode_str(cfg: &UserConfig) -> &'static str {
+    match cfg.node_mode {
+        NodeMode::WifiSniffer | NodeMode::EspNowFastCollector => "collector (fixed by mode)",
+        NodeMode::Ht20Emitter | NodeMode::Ht40Emitter | NodeMode::EspNowFastSource => {
+            "listener (fixed by mode)"
+        }
+        _ if cfg.collection_collector => "collector",
+        _ => "listener",
+    }
+}
+
 #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
 /// CLI command: `set-csi` (ESP32-C6 variant)
 ///
@@ -374,7 +389,10 @@ pub fn set_csi<'a>(
 /// Configures WiFi/radio operating parameters stored in [`USER_CONFIG`].
 ///
 /// # Options
-/// - `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operating mode.
+/// - `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operational mode.
+///   `esp-now-simplex-peer` and `esp-now-simplex-source` are accepted as aliases of
+///   `esp-now-fast-collector` (the peripheral collector end) and `esp-now-fast-source`
+///   (the central listener end).
 /// - `--sta-ssid=<SSID>` — SSID for Station mode. Wrap in `'...'` or `"..."` to include spaces; underscores are passed through literally.
 /// - `--sta-password=<PASSWORD>` — Password for Station mode. Same quoting rules as `--sta-ssid`.
 /// - `--ap-ssid=<SSID>` — SSID for wifi-ap mode. Same quoting rules as `--sta-ssid`.
@@ -385,10 +403,16 @@ pub fn set_csi<'a>(
 /// - `--ap-burst=<on|off>` — Synchronized burst flood in wifi-ap mode. Every
 ///   tick sends one frame back-to-back to every associated station for
 ///   time-aligned multi-receiver CSI (total airtime = frequency-hz × leases).
-/// - `--set-channel=<NUMBER>` — WiFi channel (1–14).
-/// - `--peer-mac=<aa:bb:cc:dd:ee:ff>` — emitter injection destination, or explicit ESP-NOW peer.
-/// - `--inject-period-ms=<MS>` — emitter inter-frame period.
-/// - `--ht40=<above|below|none>` — softAP secondary channel.
+/// - `--set-channel=<NUMBER>` — WiFi channel (1–14; the ESP32-C5 also takes 5 GHz channels).
+/// - `--peer-mac=<aa:bb:cc:dd:ee:ff>` — emitter injection destination, or explicit ESP-NOW peer
+///   (all ESP-NOW modes, simplex included; set it on both nodes).
+/// - `--inject-period-ms=<MS>` / `--inject-period-us=<US>` — emitter inter-frame period
+///   (default 20000 us). When both are given the µs value wins.
+/// - `--emitter-iface=<sta|ap>` — interface an emitter injects on.
+/// - `--ht40=<above|below|none>` — softAP secondary channel in `wifi-ap`, and the forced per-peer
+///   TX PHY in the ESP-NOW modes.
+/// - `--collection=<collector|listener>` — the node's collection mode. Read only by the modes that
+///   admit a choice (ESP-NOW central/peripheral, station, wifi-ap); the others fix it.
 ///
 /// Prints the updated WiFi configuration after applying changes.
 pub fn set_wifi<'a>(
@@ -712,6 +736,7 @@ pub fn set_wifi<'a>(
         };
         writeln!(serial, "Secondary Channel: {}", ht40_str).unwrap();
         writeln!(serial, "Emitter Period: {}us", cfg.inject_period_us).unwrap();
+        writeln!(serial, "Collection: {}", collection_mode_str(cfg)).unwrap();
     });
 }
 
@@ -764,7 +789,7 @@ pub fn start_csi_collect<'a>(
 
 /// CLI command: `set-csi-output`
 ///
-/// Toggles off-device delivery of captured CSI (`CSINode::set_csi_output_enabled`)
+/// Toggles off-device delivery of captured CSI (`esp_csi_rs::set_csi_output_enabled`)
 /// in [`USER_CONFIG`]. Disabling it leaves capture — and therefore the RX path and
 /// its timing — untouched; nothing is decoded, logged, or handed to a callback.
 ///
@@ -1039,6 +1064,7 @@ pub fn show_config<'a>(
 
         // Collection settings
         writeln!(serial, "\n[Collection]").unwrap();
+        writeln!(serial, "  Collection    : {}", collection_mode_str(cfg)).unwrap();
         writeln!(serial, "  CSI Output    : {}", cfg.csi_output_enabled).unwrap();
         match cfg.csi_peer_filter {
             Some(m) => writeln!(
