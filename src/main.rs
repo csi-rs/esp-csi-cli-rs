@@ -259,31 +259,36 @@ fn recompute_quote_state(shadow: &[u8]) -> Option<u8> {
     state
 }
 
-/// WiFi/radio operating mode selected by the user via `set-wifi --mode`.
+/// Operational mode selected by the user via `set-wifi --mode`, plus the network role where the
+/// mode has more than one end.
 ///
-/// This determines how the underlying [`esp_csi_rs::CSINode`] is constructed
-/// and which `esp-radio` interfaces are activated during a collection run.
+/// This determines which [`esp_csi_rs::OperationalMode`] the underlying
+/// [`esp_csi_rs::CSINode`] is built with and which `esp-radio` interfaces are
+/// activated during a collection run. The collection mode is a separate field
+/// (`set-wifi --collection`); see
+/// <https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md>.
 #[derive(Debug, Clone)]
 enum NodeMode {
-    /// Passively monitors all WiFi traffic on the configured channel.
+    /// Wi-Fi sniffer: promiscuous capture of whatever is on the configured channel.
+    /// Always a peripheral collector.
     WifiSniffer,
-    /// Connects to an existing WiFi network as a station.
+    /// Wi-Fi station: associates to an existing AP or router.
     WifiStation,
-    /// Self-contained softAP CSI collector (DHCP + ICMP flood).
+    /// Wi-Fi access point: self-contained softAP (DHCP + ICMP flood). Always a central.
     WifiAccessPoint,
-    /// Forced-HT20 emitter: unassociated STA loop-injecting 20 MHz 802.11n
-    /// PPDUs. TX only, never captures CSI.
+    /// Emitter, forced HT20: unassociated loop-injection of 20 MHz 802.11n
+    /// PPDUs. A central listener: TX only, never captures CSI.
     Ht20Emitter,
-    /// Forced-HT40 emitter: 40 MHz bonded 802.11n PPDUs (secondary above the
-    /// primary) on an unassociated STA. TX only.
+    /// Emitter, forced HT40: 40 MHz bonded 802.11n PPDUs (secondary above the
+    /// primary). A central listener: TX only.
     Ht40Emitter,
-    /// Acts as the central (initiating) device in an ESP-NOW pair.
+    /// ESP-NOW, central end: sources the traffic of the pair.
     EspNowCentral,
-    /// Acts as the peripheral (responding) device in an ESP-NOW pair.
+    /// ESP-NOW, peripheral end: replies to the central's traffic.
     EspNowPeripheral,
-    /// Asymmetric ESP-NOW simplex collector (sparse beacon, then RX-only).
+    /// ESP-NOW simplex, peer end: a peripheral collector (sparse beacon, then RX-only).
     EspNowFastCollector,
-    /// Asymmetric ESP-NOW simplex source (unicast flood at forced PHY).
+    /// ESP-NOW simplex, source end: a central listener (unicast flood at forced PHY).
     EspNowFastSource,
 }
 
@@ -717,8 +722,10 @@ async fn csi_collection(
         // flow through here so a user who sets `set-wifi --set-channel=6` then `start`s gets
         // channel 6 applied even though set_channel is not called on the running node.
         //
-        // The network role and collection mode are carried by each mode's config rather than
-        // chosen here, and every mode the CLI exposes takes their defaults.
+        // The network role and collection mode are carried by each mode's config. The network
+        // role is chosen here only for ESP-NOW (the `--mode` string picks the end), and the
+        // collection mode only for the modes that admit a choice (ESP-NOW, station, access point).
+        // Every other mode fixes both, so there is nothing to set.
         let mode = match user_config.node_mode {
             NodeMode::WifiSniffer => OperationalMode::Sniffer(
                 WifiSnifferConfig::default().with_channel(user_config.channel),
@@ -782,9 +789,15 @@ async fn csi_collection(
             // receives is the peripheral. The `--mode` strings are unchanged — they are the
             // cross-repo serial contract, and `esp-now-fast-collector` still names the collector
             // correctly — with the model spellings accepted as aliases.
-            NodeMode::EspNowFastCollector => OperationalMode::EspNowSimplex(SimplexConfig::peer(
-                user_config.channel,
-            )),
+            NodeMode::EspNowFastCollector => {
+                // `--peer-mac` pairs this end with a known source instead of discovering one, the
+                // same as on the source end (`build_espnow_fast_config`). Both ends need the other's.
+                let mut peer = SimplexConfig::peer(user_config.channel);
+                if let Some(mac) = user_config.peer_mac {
+                    peer = peer.with_peer_mac(mac);
+                }
+                OperationalMode::EspNowSimplex(peer)
+            }
             NodeMode::EspNowFastSource => OperationalMode::EspNowSimplex(SimplexConfig::source(
                 build_espnow_fast_config(&user_config),
             )),

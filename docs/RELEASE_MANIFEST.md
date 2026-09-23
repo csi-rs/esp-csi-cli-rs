@@ -23,8 +23,8 @@ The [Release firmware binaries](../.github/workflows/release.yml) workflow:
 3. Tag and push:
 
 ```bash
-git tag v0.7.0
-git push origin v0.7.0
+git tag v0.8.0
+git push origin v0.8.0
 ```
 
 The workflow extracts that section into the GitHub release description
@@ -36,10 +36,10 @@ Or run the workflow manually from the Actions tab and supply the tag.
 
 ```json
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "assets": {
     "esp32": {
-      "url": "https://github.com/csi-rs/esp-csi-cli-rs/releases/download/v0.7.0/esp-csi-cli-rs-esp32.bin",
+      "url": "https://github.com/csi-rs/esp-csi-cli-rs/releases/download/v0.8.0/esp-csi-cli-rs-esp32.bin",
       "sha256": "<hex>",
       "flash_address": 0,
       "baud": 115200
@@ -90,7 +90,7 @@ After building binaries into `dist/`:
 
 ```bash
 chmod +x scripts/generate-release-manifest.sh
-./scripts/generate-release-manifest.sh 0.7.0 v0.7.0 dist
+./scripts/generate-release-manifest.sh 0.8.0 v0.8.0 dist
 ```
 
 Expected inputs:
