@@ -1,8 +1,10 @@
 # esp-csi-cli-rs — Web Server Integration Guide
 
-This document describes how to drive `esp-csi-cli-rs` **v0.7.0** from a host
+This document describes how to drive `esp-csi-cli-rs` **v0.8.0** from a host
 web server or automation layer over a serial transport (UART or USB-Serial-JTAG).
-It focuses on wire formats, new v0.7.0 commands, and multi-device pairing flows.
+It focuses on wire formats, the command surface, and multi-device pairing flows.
+The vocabulary (operational mode, network role, collection mode) follows the
+[esp-csi-rs node model](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
 
 For the full on-device CLI specification see [`SPECS.md`](SPECS.md).
 
@@ -35,7 +37,7 @@ Browser/API  →  Web server  →  Serial bridge (one task per MAC)  →  ESP bo
 After reset the firmware emits a welcome banner. The first lines are:
 
 ```text
-ESP-CSI-CLI/0.7.0
+ESP-CSI-CLI/0.8.0
 mac=D0:CF:13:E2:90:E8
 ******* Welcome to the CSI Collection CLI utility! *******
 ...
@@ -50,50 +52,61 @@ MAC so USB re-enumeration after `restart` re-binds correctly.
 Send `info\r`. Response (stable for `protocol=2`):
 
 ```text
-ESP-CSI-CLI/0.7.0
+ESP-CSI-CLI/0.8.0
 name=esp-csi-cli-rs
-version=0.7.0
+version=0.8.0
 chip=esp32c6
 protocol=2
 mac=D0:CF:13:E2:90:E8
-features=statistics,println,async-print,auto
+log=text
+transport=auto
+baud=115200
+features=statistics,println,auto
 END-INFO
 ```
 
 | Key | Use |
 |-----|-----|
-| `version` | Feature gating (e.g. require `>= 0.7.0` for new WiFi modes) |
+| `version` | Feature gating (e.g. require `>= 0.8.0` for `--collection`) |
 | `protocol` | Wire-format version; currently `2` |
 | `mac` | Stable device ID for your DB / session map |
 | `chip` | UI labels, chip-specific CSI options |
+| `log` | `text` or `defmt`: which decoder the log frames need |
+| `transport` | `auto`, `jtag` or `uart`: the console the build writes to |
+| `baud` | UART rate the build was compiled with |
 | `features` | Unordered set; `statistics` ⇒ `show-stats` exists |
+
+Parsers should ignore unknown keys: `info` gains lines without a `protocol` bump.
 
 ---
 
 ## 3. Mode and option surface
 
-### 3.1 WiFi operating modes (`set-wifi --mode=`)
+### 3.1 Operational modes (`set-wifi --mode=`)
 
-Three families: **emitters**, which put known RF energy on the channel and never
-capture; the **Wi-Fi collector** modes, which capture the channel response from
-frames the radio already receives; and the connectionless **ESP-NOW pairs**, which
-need no association or DHCP and capture from their own exchange.
+Each `--mode` value selects an operational mode (how the node reaches the
+channel) and, where the link has two ends, which end. The collection mode is set
+separately with `--collection`, and only where the mode admits a choice.
 
-| CLI value | `NodeMode` (in `show-config`) | Role |
-|-----------|-------------------------------|------|
-| `sniffer` | `WifiSniffer` | Collector — passive channel monitor |
-| `station` | `WifiStation` | Collector — connect to an existing AP |
-| `wifi-ap` | `WifiAccessPoint` | Collector — softAP (DHCP + ICMP flood) |
-| **`ht20-emitter`** | **`Ht20Emitter`** | **Emitter — 20 MHz 802.11n HT PPDUs (TX only)** |
-| **`ht40-emitter`** | **`Ht40Emitter`** | **Emitter — 40 MHz bonded 802.11n HT PPDUs (TX only)** |
-| **`esp-now-central`** | **`EspNowCentral`** | **ESP-NOW pair — drives the exchange; captures** |
-| **`esp-now-peripheral`** | **`EspNowPeripheral`** | **ESP-NOW pair — replies; captures** |
-| **`esp-now-fast-collector`** | **`EspNowFastCollector`** | **Asymmetric simplex — sparse beacon, then RX-only** |
-| **`esp-now-fast-source`** | **`EspNowFastSource`** | **Asymmetric simplex — unicast flood at forced PHY** |
+| CLI value | `NodeMode` (in `show-config`) | Operational mode | Link end / collection mode |
+|-----------|-------------------------------|------------------|----------------------------|
+| `sniffer` | `WifiSniffer` | Wi-Fi sniffer | peripheral; always a collector |
+| `station` | `WifiStation` | Wi-Fi station | associates to an existing AP; `--collection` |
+| `wifi-ap` | `WifiAccessPoint` | Wi-Fi access point | central softAP (DHCP + ICMP flood); `--collection` |
+| `ht20-emitter` | `Ht20Emitter` | Emitter | central; always a listener (20 MHz HT, TX only) |
+| `ht40-emitter` | `Ht40Emitter` | Emitter | central; always a listener (40 MHz HT, TX only) |
+| `esp-now-central` | `EspNowCentral` | ESP-NOW | central end (sources the traffic); `--collection` |
+| `esp-now-peripheral` | `EspNowPeripheral` | ESP-NOW | peripheral end (replies); `--collection` |
+| `esp-now-fast-collector` (alias `esp-now-simplex-peer`) | `EspNowFastCollector` | ESP-NOW simplex | peer end: peripheral collector (sparse beacon, then RX-only) |
+| `esp-now-fast-source` (alias `esp-now-simplex-source`) | `EspNowFastSource` | ESP-NOW simplex | source end: central listener (unicast flood at forced PHY) |
 
-Both members of an ESP-NOW pair must share `--set-channel`. Pairing is automatic
-(magic-prefix) unless `--peer-mac` is set on **both** nodes. An emitter needs no
-pair at all — any number of `sniffer` collectors on its channel will hear it.
+Both members of an ESP-NOW pair, simplex included, must share `--set-channel`.
+Pairing is automatic unless `--peer-mac` is set on **both** nodes. An emitter
+needs no pair at all — any number of `sniffer`s on its channel will hear it.
+
+Since v0.8.0 the simplex source is the central and the peer is the peripheral;
+the ends were labelled the other way round before. The `--mode` strings and the
+on-air behaviour did not change.
 
 ### 3.2 `set-wifi` options
 
@@ -103,12 +116,14 @@ pair at all — any number of `sniffer` collectors on its channel will hear it.
 | `--ap-password=<PASSWORD>` | ≤ 32 bytes; empty = open | *(empty)* | `wifi-ap` |
 | `--ap-dhcp=<on\|off>` | `on`, `off`, `true`, `false`, `1`, `0`, `yes`, `no` | `on` | `wifi-ap` |
 | `--ap-leases=<1-8>` | DHCP lease pool size; > 1 round-robins the ICMP flood across all associated stations | `4` | `wifi-ap` |
-| `--inject-period-ms=<MS>` | Emitter inter-frame period (≈ 20 ms → 50 fps) | `20` | `ht*-emitter` |
+| `--inject-period-us=<US>` | Emitter inter-frame period (≈ 20000 us → 50 fps); wins over the ms flag | `20000` | `ht*-emitter` |
+| `--inject-period-ms=<MS>` | Emitter inter-frame period in whole ms (coarse) | — | `ht*-emitter` |
 | `--emitter-iface=<sta\|ap>` | Which interface injects | `sta` | `ht*-emitter` |
+| `--collection=<collector\|listener>` | Collection mode; a listener captures but reports nothing | `collector` | `station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral` (ignored elsewhere; the mode fixes it) |
 
 Existing options: `--sta-ssid`, `--sta-password`, `--set-channel` as before.
 `--peer-mac` is read per mode — the emitter's injection destination (empty =
-broadcast) or the explicit ESP-NOW peer (empty = automatic pairing). `--ht40` is
+broadcast) or the explicit ESP-NOW peer, simplex included (empty = automatic pairing). `--ht40` is
 the softAP secondary channel in `wifi-ap` or the per-peer HT40 TX PHY in the
 ESP-NOW modes; it never selects emitter bandwidth, which is `--mode=ht40-emitter`.
 
@@ -121,7 +136,8 @@ ESP-NOW modes; it never selects emitter bandwidth, which is `--mode=ht40-emitter
 | `serve_dhcp` | `true` |
 | `ap_lease_count` | `4` |
 | `csi_output_enabled` | `true` |
-| `inject_period_ms` | `20` |
+| `collection_collector` | `true` (collector) |
+| `inject_period_us` | `20000` |
 
 ### 3.4 `show-config` additions
 
@@ -132,6 +148,13 @@ The `[WiFi]` section now always includes:
   AP Pass : open          # or  AP Pass : 'secret'
   AP DHCP : true
   AP Leases: 4
+  AP Burst : false
+```
+
+The `[Collection]` section starts with the collection mode the next run uses:
+
+```text
+  Collection    : collector   # or  listener, or  collector|listener (fixed by mode)
 ```
 
 ### 3.5 `set-wifi` confirmation output
@@ -146,23 +169,29 @@ WiFi Channel: 6
 Station WiFi Settings:
 SSID: '', Password: ''
 Access Point Settings:
-SSID: 'esp-csi-ap', Password: (open), DHCP: true, Leases: 4
+SSID: 'esp-csi-ap', Password: (open), DHCP: true, Leases: 4, Burst: false
 Peer MAC: unset (emitter broadcasts / ESP-NOW auto-pairs)
-Emitter Period: 20ms
-softAP Secondary Channel: HT20/legacy
+Secondary Channel: HT20/legacy
+Emitter Period: 20000us
+Collection: collector
 ```
 
 ### 3.6 Behavior notes for integrators
 
-- **CSI output gate:** `set-csi-output --enabled=<true|false>` replaces the old
-  `set-collection-mode --mode=collector|listener`. With delivery off the radio
-  still captures (RX path and timing unchanged) but nothing is decoded or logged.
+- **Collection mode vs. output gate:** the old
+  `set-collection-mode --mode=collector|listener` is gone. The node's collection
+  mode is now `set-wifi --collection=collector|listener`, read only by `station`,
+  `wifi-ap`, `esp-now-central` and `esp-now-peripheral` (the ESP-NOW modes also
+  announce it to the peer). `set-csi-output --enabled=<true|false>` is the
+  runtime delivery gate: with delivery off the radio still captures (RX path and
+  timing unchanged) but nothing is decoded or logged.
 - **Power saving:** AP and station modes disable Wi-Fi power saving at collection
   start (throughput-oriented).
-- **`set-rate`:** Reporting only — nothing applies it. Collectors derive their
-  rate from the surrounding radio configuration, an emitter's rate follows its
-  forced TX PHY, and the ESP-NOW central/peripheral pair applies it as its
-  forced TX PHY.
+- **`set-rate`:** Reporting only, except on the ESP-NOW pair:
+  `esp-now-central` / `esp-now-peripheral` apply it as the per-peer TX PHY.
+  Station, sniffer and wifi-ap take their rate from the surrounding radio
+  configuration, an emitter's rate follows its forced TX PHY, and the simplex
+  source uses its profile's fixed rate.
 - **`set-protocol`:** User-configurable (`lr` default). For AP + STA lab pairs
   use `n` on **both** boards.
 - **`set-traffic`:** Default remains 100 Hz. Library AP/STA examples use 4000 Hz;
@@ -182,7 +211,8 @@ Commands are sent as a single line (no shell). Example: `set-wifi --mode=wifi-ap
 | `set-traffic --frequency-hz=N` | `POST /devices/{mac}/traffic` | `0` = off |
 | `set-csi-output --enabled=true\|false` | `POST /devices/{mac}/csi-output` | Default `true` |
 | `set-protocol --protocol=n` | `POST /devices/{mac}/protocol` | `b\|g\|n\|lr\|a\|ac` |
-| `set-rate --rate=mcs7-lgi` | `POST /devices/{mac}/rate` | Reporting only |
+| `set-rate --rate=mcs7-lgi` | `POST /devices/{mac}/rate` | Reporting only, except on the ESP-NOW pair |
+| `set-csi-filter --peer-mac=<mac\|any> --min-phy=<any\|ht>` | `POST /devices/{mac}/csi-filter` | Drop frames before delivery |
 | `set-io-tasks --tx=on --rx=on` | `POST /devices/{mac}/io-tasks` | |
 | `set-csi …` | `POST /devices/{mac}/csi` | Chip-specific flags |
 | `reset-config` | `POST /devices/{mac}/reset-config` | Restore all defaults |
@@ -194,6 +224,7 @@ Commands are sent as a single line (no shell). Example: `set-wifi --mode=wifi-ap
 | `set-log-mode --mode=array-list` | `POST /devices/{mac}/log-mode` | Takes effect on next packet |
 | `set-csi-delivery --mode=callback` | `POST /devices/{mac}/csi-delivery` | Overridden partially at `start` |
 | `info` | `GET /devices/{mac}/info` | Machine-parseable block |
+| `version` | `GET /devices/{mac}/version` | `open <semver>` |
 | `show-config` | `GET /devices/{mac}/config` | Human-readable; parse lines or regex |
 | `show-stats` | `GET /devices/{mac}/stats` | Requires `statistics` feature |
 | `restart` | `POST /devices/{mac}/restart` | Not available during collection |
@@ -215,7 +246,7 @@ During `start`, CSI packets are written as log lines (format set by `set-log-mod
 Recommended approach: send `show-config\r`, read until the closing
 `===================================` line.
 
-### 5.1 `[WiFi]` section (v0.7.0)
+### 5.1 `[WiFi]` section
 
 ```text
 [WiFi]
@@ -241,6 +272,7 @@ Recommended approach: send `show-config\r`, read until the closing
 | `AP Pass : ` | `open` or quoted password |
 | `AP DHCP : ` | `true` / `false` |
 | `Dst MAC : ` | MAC or `broadcast` |
+| `Collection    : ` | *(in `[Collection]` section)* `collector` or `listener`, optionally followed by `(fixed by mode)` |
 | `Protocol      : ` | *(in `[Collection]` section)* `LR`, `N`, etc. |
 
 ### 5.2 Example JSON mapping
@@ -273,9 +305,9 @@ Store these as presets in your web server. Each step is one line sent to the
 device serial port; wait for the prompt (`> `) or expected acknowledgment before
 the next command unless noted.
 
-### 6.1 SoftAP lab pair (board A = AP collector, board B = station)
+### 6.1 SoftAP lab pair (board A = access point, board B = station)
 
-**Board A — AP collector**
+**Board A — access point (central collector)**
 
 ```text
 reset-config
@@ -308,9 +340,9 @@ to multiple station boards without extra configuration. Use
 flood). The offered rate is shared: with N stations each sees roughly
 `frequency-hz / N` packets per second.
 
-### 6.2 HT emitter + sniffer collector
+### 6.2 Emitter + sniffer
 
-**Collector board** — lock the emitter's channel and measure every frame overheard.
+**Sniffer board** (peripheral collector) — lock the emitter's channel and measure every frame overheard.
 
 ```
 set-wifi --mode=sniffer --set-channel=6
@@ -319,22 +351,23 @@ set-log-mode --mode=array-list
 start
 ```
 
-**Emitter board** — 20 MHz; use `ht40-emitter` for 40 MHz bonded.
+**Emitter board** (central listener) — 20 MHz; use `ht40-emitter` for 40 MHz bonded.
 
 ```
-set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
+set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-us=20000
 start
 ```
 
 An emitter never associates and its frames carry no payload meaning, so a single
-emitter sounds every sniffer collector in range at once. Unicasting with
-`--peer-mac` to one collector tends to raise that collector's CSI callback rate.
+emitter sounds every sniffer in range at once. Unicasting with `--peer-mac` to
+one sniffer tends to raise that sniffer's CSI callback rate.
 
 ### 6.3 ESP-NOW central + peripheral
 
-Connectionless: no AP, no DHCP, no association. Both sides capture CSI.
+Connectionless: no AP, no DHCP, no association. Both ends capture CSI, and each
+is a collector unless set to `--collection=listener`.
 
-**Central board** — drives the exchange.
+**Central board** — sources the traffic.
 
 ```
 set-wifi --mode=esp-now-central --set-channel=6
@@ -355,22 +388,25 @@ start
 With more than two boards on one channel, set `--peer-mac` on both to pin the
 pair explicitly rather than relying on magic-prefix discovery.
 
-### 6.4 ESP-NOW fast simplex pair (highest CSI rate)
+### 6.4 ESP-NOW simplex pair (highest CSI rate)
 
-Asymmetric on purpose: the collector beacons sparsely until it hears a source,
-then stops transmitting and goes RX-only, so all airtime belongs to one
-transmitter. Start the collector first.
+Asymmetric on purpose: the peer (peripheral collector) beacons sparsely until it
+hears a source, then stops transmitting and goes RX-only, so all airtime belongs
+to the source (central listener). Start the peer first.
 
 ```
-# Collector board
-set-wifi --mode=esp-now-fast-collector --set-channel=6
+# Peer board (peripheral collector)
+set-wifi --mode=esp-now-simplex-peer --set-channel=6
 set-log-mode --mode=serialized
 start
 
-# Source board
-set-wifi --mode=esp-now-fast-source --set-channel=6
+# Source board (central listener)
+set-wifi --mode=esp-now-simplex-source --set-channel=6
 start
 ```
 
-`set-rate` does not apply to this pair — the fast profile fixes its own PHY.
+`esp-now-simplex-peer` / `esp-now-simplex-source` are aliases of
+`esp-now-fast-collector` / `esp-now-fast-source`; either spelling works. To pin
+the pair, set `--peer-mac` on both boards. `set-rate` does not apply to this
+pair — the simplex profile fixes its own PHY.
 
