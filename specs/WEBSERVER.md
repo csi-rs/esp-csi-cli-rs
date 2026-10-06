@@ -49,14 +49,14 @@ MAC so USB re-enumeration after `restart` re-binds correctly.
 
 ### 2.2 Active (`info` command)
 
-Send `info\r`. Response (stable for `protocol=2`):
+Send `info\r`. Response (stable for `protocol=3`; 3 = esp-csi-rs 0.12 `wire` serialized frames):
 
 ```text
 ESP-CSI-CLI/0.8.0
 name=esp-csi-cli-rs
 version=0.8.0
 chip=esp32c6
-protocol=2
+protocol=3
 mac=D0:CF:13:E2:90:E8
 log=text
 transport=auto
@@ -136,7 +136,7 @@ ESP-NOW modes; it never selects emitter bandwidth, which is `--mode=ht40-emitter
 | `serve_dhcp` | `true` |
 | `ap_lease_count` | `4` |
 | `csi_output_enabled` | `true` |
-| `collection_collector` | `true` (collector) |
+| `reporting` | `Always` (collector) |
 | `inject_period_us` | `20000` |
 
 ### 3.4 `show-config` additions
