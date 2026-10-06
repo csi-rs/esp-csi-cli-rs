@@ -9,8 +9,9 @@ use menu::{Item, ItemType, Menu, Parameter};
 use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
     cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_filter,
-    set_csi_output, set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd, set_traffic,
-    set_wifi, show_config, start_csi_collect, version_cmd,
+    set_csi_output, set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd,
+    set_reporting_cmd, set_session_cmd, set_traffic, set_wifi, show_config, start_csi_collect,
+    version_cmd,
 };
 pub use crate::cli::serial::SerialInterface;
 // `is_jtag` is only compiled under `auto` (see serial.rs); match that gating
@@ -176,8 +177,8 @@ Description:
   Filtering on the device rather than on the host also returns console bandwidth
   to the traffic you asked for: a rejected frame is dropped in the Wi-Fi callback
   before the packet copy and before any formatting. Rejected frames are counted
-  in `show-stats` as RX drops, so the difference between captured and delivered
-  stays visible rather than unexplained."),
+  in `show-stats` as `RX Filtered` (not as drops), so the difference between
+  captured and delivered stays visible rather than unexplained."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -199,7 +200,9 @@ Usage:
 Options:
   --mode=text           Human-readable verbose output with metadata (default).
   --mode=array-list     Compact CSV-style array output, one line per packet.
-  --mode=serialized     Binary COBS-framed postcard format for host-side parsing.
+  --mode=serialized     Binary COBS-framed postcard frames in the versioned
+                        esp_csi_rs::wire format (esp-csi-rs 0.12; protocol=3).
+                        Decode with esp_csi_rs::wire::decode_cobs.
   --mode=esp-csi-tool   Hernandez-style 26-column CSV (`CSI_DATA,...` lines) for
                         compatibility with the ESP32-CSI-Tool collector.
 
@@ -296,12 +299,37 @@ CSI Configuration is ignored when running in Access Point Mode."),
                     Parameter::NamedValue {
                         parameter_name: "preset",
                         argument_name: "preset",
-                        help: Some("CSI preset: default"),
+                        help: Some("CSI preset: default|he20"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "dump-ack",
                         argument_name: "onoff",
                         help: Some("Dump 802.11 ACK frames: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-su",
+                        argument_name: "onoff",
+                        help: Some("HE-LTF on HE SU PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-mu",
+                        argument_name: "onoff",
+                        help: Some("HE-LTF on HE MU PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-dcm",
+                        argument_name: "onoff",
+                        help: Some("HE-LTF on DCM PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-beamformed",
+                        argument_name: "onoff",
+                        help: Some("HE-LTF on beamformed PPDU: on|off"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "csi-he-stbc",
+                        argument_name: "onoff",
+                        help: Some("HE-LTF on HE STBC PPDU: on|off"),
                     },
                     #[cfg(feature = "esp32c5")]
                     Parameter::NamedValue {
@@ -333,8 +361,14 @@ Usage:
     --csi-ht20=<on|off>         HT-LTF when receiving an HT20 PPDU (default: on)
     --csi-ht40=<on|off>         HT-LTF when receiving an HT40 PPDU (default: on)
     --val-scale-cfg             Value 0-3 (default: 2)
-    --preset=<default>          Apply a CSI acquisition preset
+    --preset=<default|he20>     Apply a CSI acquisition preset. he20 = HE-LTF only
+                                (legacy/HT/ACK acquisition off), for HE20 links
     --dump-ack=<on|off>         Dump 802.11 ACK frames (default: on)
+    --csi-su=<on|off>           HE-LTF on HE SU PPDUs (default: on)
+    --csi-mu=<on|off>           HE-LTF on HE MU PPDUs (default: on)
+    --csi-dcm=<on|off>          HE-LTF on DCM PPDUs (default: on)
+    --csi-beamformed=<on|off>   HE-LTF on beamformed PPDUs (default: on)
+    --csi-he-stbc=<on|off>      HE-LTF on HE STBC PPDUs
     --csi-force-lltf=<on|off>   Force L-LTF acquisition (ESP32-C5 only)
     --csi-vht=<on|off>          VHT-LTF on VHT20 PPDUs (ESP32-C5 only)
 
@@ -342,6 +376,7 @@ Examples:
     set-csi --csi-legacy=off --preset=default
     set-csi --csi-ht40=on --csi-ht20=off
     set-csi --csi=off
+    set-csi --preset=he20
 
 Description:
 This command allows you to enable or disable specific Channel State Information (CSI) features.
@@ -419,7 +454,13 @@ configurations on or off."),
                     Parameter::NamedValue {
                         parameter_name: "collection",
                         argument_name: "collection",
-                        help: Some("collector|listener — whether this node's CSI leaves it"),
+                        help: Some("collector|listener|threshold|decimate — whether this node's CSI leaves it"),
+                    },
+                    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+                    Parameter::NamedValue {
+                        parameter_name: "he20",
+                        argument_name: "he20",
+                        help: Some("HE20 (802.11ax) PHY for emitters and the ESP-NOW pair: on|off"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "inject-period-us",
@@ -451,12 +492,19 @@ Options:
                                                                 esp-now-fast-source. Aliases:
                                                                 esp-now-simplex-peer = esp-now-fast-collector,
                                                                 esp-now-simplex-source = esp-now-fast-source.
-  --collection=<collector|listener>                             The node's collection mode (default: collector).
-                                                                A listener captures CSI but reports none. Read
-                                                                only by esp-now-central, esp-now-peripheral,
-                                                                station and wifi-ap; every other mode fixes it
-                                                                (sniffer and the simplex peer collect, emitters
-                                                                and the simplex source listen).
+  --collection=<collector|listener|threshold|decimate>          The node's reporting policy (default: collector).
+                                                                A listener captures CSI but reports none;
+                                                                threshold reports only while the channel moves,
+                                                                decimate every n-th frame (parameters: see
+                                                                set-reporting). Read by esp-now-central,
+                                                                esp-now-peripheral, station and wifi-ap; the
+                                                                sniffer takes all but listener; every other mode
+                                                                fixes it (the simplex peer collects, emitters and
+                                                                the simplex source listen).
+  --he20=<on|off>                                               ESP32-C5/C6 only. Force HE20 (802.11ax SU, 20 MHz)
+                                                                on ht20-/ht40-emitter (replaces the HT PHY) and on
+                                                                esp-now-central/-peripheral (overrides --ht40).
+                                                                Pair collectors with set-csi --preset=he20.
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
   --ap-ssid=<SSID>                                              Set the SSID for wifi-ap mode (default: esp-csi-ap).
@@ -504,6 +552,7 @@ Examples:
   set-wifi --mode=esp-now-peripheral --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
   set-wifi --mode=esp-now-simplex-peer --set-channel=6
   set-wifi --mode=station --sta-ssid=MyAP --collection=listener
+  set-wifi --mode=ht20-emitter --he20=on                         # C5/C6
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
@@ -637,7 +686,8 @@ Output format:
   The same magic line `ESP-CSI-CLI/<version>` is also printed at the top
   of the welcome banner on every reset, so a host can identify the
   firmware passively without sending this command. The `protocol` field
-  bumps on any breaking change to this grammar."),
+  bumps on any breaking change to this grammar or to the serialized CSI
+  format (3 = esp-csi-rs 0.12 `wire` frames)."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -746,7 +796,7 @@ Description:
                     Parameter::NamedValue {
                         parameter_name: "protocol",
                         argument_name: "protocol",
-                        help: Some("Wi-Fi PHY protocol: b|g|n|lr|a|ac"),
+                        help: Some("Wi-Fi PHY protocol: b|g|n|lr|a|ac|ax"),
                     },
                 ],
             },
@@ -754,10 +804,12 @@ Description:
             help: Some("set-protocol - Set the Wi-Fi PHY protocol.
 
 Usage:
-  set-protocol --protocol=<b|g|n|lr|a|ac>
+  set-protocol --protocol=<b|g|n|lr|a|ac|ax>
 
 Options:
-  --protocol=<NAME>   One of: b, g, n, lr (default), a, ac.
+  --protocol=<NAME>   One of: b, g, n, lr (default), a, ac, and ax on the
+                      ESP32-C5/C6 (802.11ax; HE20 bring-up for station,
+                      wifi-ap and sniffer).
 
 Examples:
   set-protocol --protocol=lr     # ESP-to-ESP long range (sniffer)
@@ -833,7 +885,7 @@ Options:
   --mode=async      Queue packets for CSINodeClient::next_csi_packet (default
                     used by the CLI's indefinite collection path).
   --mode=raw        Zero-copy CPU-benchmark fast-path: the WiFi callback returns
-                    before building the CSIDataPacket, so no CSI data is
+                    before building the CsiPacket, so no CSI data is
                     delivered or logged. Applies on the next `start` (no q-key
                     stop).
   --logging=on/off  Toggle the per-packet UART/JTAG `log_csi` gate
@@ -868,9 +920,110 @@ Description:
   - RX/TX packet totals
   - RX/TX PPS averages
   - RX/TX rate in Hz
-  - RX dropped packets
+  - RX dropped packets (losses only), broken down into oversize, queue full
+    and on-air sequence gaps
+  - RX filtered (set-csi-filter) and policy-suppressed (threshold/decimate)
+    frames, which are deliberate and not counted as drops
+  - log lines the logger dropped
 
   Counters reset on the start of each new `start` collection."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_reporting_cmd,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "policy",
+                        argument_name: "policy",
+                        help: Some("always|never|threshold|decimate"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "level",
+                        argument_name: "level",
+                        help: Some("Threshold score 0-65535"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "hold-ms",
+                        argument_name: "holdms",
+                        help: Some("Threshold hold window in ms"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "n",
+                        argument_name: "n",
+                        help: Some("Decimation: report every n-th measurement"),
+                    },
+                ],
+            },
+            command: "set-reporting",
+            help: Some("set-reporting - Set the reporting policy and its parameters.
+
+Usage:
+  set-reporting [--policy=<always|never|threshold|decimate>] [--level=<N>]
+                [--hold-ms=<MS>] [--n=<N>]
+
+Options:
+  --policy=always     Report every measurement (= --collection=collector).
+  --policy=never      Report nothing (= --collection=listener).
+  --policy=threshold  Report only while the channel moves: a measurement whose
+                      score reaches --level opens a --hold-ms window in which
+                      every measurement is reported.
+  --policy=decimate   Report every --n-th measurement.
+  --level=<0-65535>   Threshold score (default: 6000, uncalibrated).
+  --hold-ms=<MS>      Threshold hold window (default: 1000).
+  --n=<N>             Decimation factor (default: 2).
+
+Examples:
+  set-reporting --policy=threshold --level=5000 --hold-ms=500
+  set-reporting --policy=decimate --n=10
+  set-reporting --policy=always
+
+Description:
+  The same setting as `set-wifi --collection=`, plus the parameters. Read by
+  esp-now-central, esp-now-peripheral, station and wifi-ap; the sniffer takes
+  threshold and decimate but not never; the other modes fix it.
+
+  Calibrate --level on your own link: a still room does not score zero (two
+  ESP32-C5s at HE20 measured a ~2700 median and ~4300 99th percentile).
+  Frames withheld by the policy appear in show-stats as policy-suppressed."),
+        },
+        &Item {
+            item_type: ItemType::Callback {
+                function: set_session_cmd,
+                parameters: &[
+                    Parameter::NamedValue {
+                        parameter_name: "id",
+                        argument_name: "id",
+                        help: Some("Session id (u32, decimal or 0x hex)"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "epoch",
+                        argument_name: "epoch",
+                        help: Some("Current UNIX time in microseconds"),
+                    },
+                ],
+            },
+            command: "set-session",
+            help: Some("set-session - Name the measurement session.
+
+Usage:
+  set-session --id=<u32> [--epoch=<unix_us>]
+
+Options:
+  --id=<u32>          Session id stamped on every serialized frame's envelope.
+                      Decimal or 0x-prefixed hex.
+  --epoch=<unix_us>   The current UNIX time in microseconds. The next run's first
+                      frame announces it, so a host can put every frame on wall
+                      time. Omit to announce no wall time.
+
+Examples:
+  set-session --id=42
+  set-session --id=0x1a2b --epoch=1791234567000000
+
+Description:
+  Maps to esp_csi_rs::set_session and takes effect immediately, persisting
+  across runs until changed or the board resets (reset-config does not clear
+  it). Without it, each run draws a random session id. Only the serialized log
+  mode carries the session on the wire."),
         },
 
     ],

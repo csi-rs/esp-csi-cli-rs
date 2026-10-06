@@ -62,8 +62,8 @@ use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CsiDeliveryMode, EmitterConfig, EspNowConfig, HtBandwidth,
-    NetworkRole, NodeHardware, OperationalMode, SimplexConfig, WifiApConfig,
+    CSINode, CSINodeClient, CsiDeliveryMode, EmitterConfig, EmitterPhy, EspNowConfig,
+    NetworkRole, NodeHardware, OperationalMode, ReportingPolicy, SimplexConfig, WifiApConfig,
     WifiSnifferConfig, WifiStationConfig, clear_csi_callback, set_csi_delivery_mode,
     set_csi_logging_enabled, set_csi_raw_callback,
 };
@@ -80,16 +80,15 @@ use esp_hal::uart::Uart;
         feature = "esp32s3"
     )
 ))]
-use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{AuthenticationMethod, Interfaces, PowerSaveMode, WifiController};
+use esp_radio::wifi::{AuthenticationMethodConfig, PowerSaveMode, WifiController};
 use menu::*;
 
 esp_app_desc!();
 
 extern crate alloc;
-use alloc::string::ToString;
 
 /// Reclaimed-RAM heap size per chip (link-tested against this firmware).
 ///
@@ -180,7 +179,7 @@ fn jtag_peek_for_stop() -> bool {
 }
 
 /// Raw CSI fast-path callback (CPU-benchmark mode). The WiFi callback invokes
-/// this and returns *before* building the ~640 B `CSIDataPacket`, so the
+/// this and returns *before* building the `CsiPacket`, so the
 /// per-frame cost is just the dispatch — matching the ESP-IDF reference. No CSI
 /// data is delivered or logged; stop relies on duration / reset / main-loop `q`.
 fn raw_csi_noop() {}
@@ -200,7 +199,26 @@ fn build_espnow_config(user_config: &UserConfig) -> EspNowConfig {
     if let Some(secondary) = user_config.ht40_secondary {
         cfg = cfg.with_ht40(secondary);
     }
+    // HE20 overrides HT40: it is a 20 MHz PHY, and `with_he20` clears the secondary channel.
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    if user_config.he20 {
+        cfg = cfg.with_he20();
+    }
     cfg
+}
+
+/// The SSID / password pair as esp-radio's validated types. Both fields are `heapless::String<32>`,
+/// inside esp-radio's 32-byte SSID and 64-byte password limits, so the conversions cannot fail.
+fn ssid_and_auth(ssid: &str, password: &str) -> (esp_radio::wifi::Ssid, AuthenticationMethodConfig) {
+    let ssid = ssid.try_into().expect("SSID fits in 32 bytes");
+    let auth = if password.is_empty() {
+        AuthenticationMethodConfig::Open
+    } else {
+        AuthenticationMethodConfig::Wpa2Personal(
+            password.try_into().expect("password fits in 64 bytes"),
+        )
+    };
+    (ssid, auth)
 }
 
 /// As [`build_espnow_config`], but from `EspNowConfig::fast_default()` — the asymmetric simplex
@@ -217,19 +235,11 @@ fn build_espnow_fast_config(user_config: &UserConfig) -> EspNowConfig {
 }
 
 fn build_wifi_ap_config(user_config: &UserConfig) -> WifiApConfig {
-    let auth = if user_config.ap_password.is_empty() {
-        AuthenticationMethod::None
-    } else {
-        AuthenticationMethod::Wpa2Personal
-    };
-    let mut ap_radio_config = AccessPointConfig::default()
-        .with_ssid(user_config.ap_ssid.as_str().to_string())
+    let (ssid, auth) = ssid_and_auth(&user_config.ap_ssid, &user_config.ap_password);
+    let ap_radio_config = AccessPointConfig::default()
+        .with_ssid(ssid)
         .with_channel(user_config.channel)
-        .with_auth_method(auth);
-    if !user_config.ap_password.is_empty() {
-        ap_radio_config =
-            ap_radio_config.with_password(user_config.ap_password.as_str().to_string());
-    }
+        .with_authentication(auth);
     WifiApConfig::new(
         ap_radio_config,
         user_config.channel,
@@ -322,13 +332,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: HEAP_SIZE);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // Initialize ESP radio + Wi-Fi controller. v0.6.0 folded the standalone
-    // `esp_radio::init()` call into `esp_radio::wifi::new`, so there is no
-    // longer a separately-staticked radio controller.
+    // Initialize the Wi-Fi controller. Since esp-radio 1.0 the controller no
+    // longer hands out the interfaces; `NodeHardware::new` claims them itself.
     //
     // AMPDU aggregates multiple frames into one PPDU, which the CSI callback only
     // fires once for — fewer, clumpier CSI events and Block-Ack recovery stalls
@@ -344,7 +351,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_dynamic_rx_buf_num(16)
         .with_dynamic_tx_buf_num(16)
         .with_rx_ba_win(4);
-    let (wifi_controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, config_radio)
+    let wifi_controller = WifiController::new(peripherals.WIFI, config_radio)
         .expect("Failed to initialize Wi-Fi controller");
 
     let controller = WIFI_CONTROLLER.init(wifi_controller);
@@ -362,7 +369,7 @@ async fn main(spawner: Spawner) -> ! {
     // mismatches surface as errors); unwrap before handing the token to the
     // spawner, which itself now returns `()` instead of a `Result`.
     spawner.spawn(
-        csi_collection(interfaces, controller).expect("failed to spawn csi_collection task"),
+        csi_collection(controller).expect("failed to spawn csi_collection task"),
     );
 
     // Create a buffer to store CLI input. `menu` prints "Buffer overflow!" for
@@ -690,10 +697,7 @@ async fn main(spawner: Spawner) -> ! {
 ///
 /// This task runs for the lifetime of the application and restarts the cycle
 /// on every subsequent `start` command.
-async fn csi_collection(
-    mut interfaces: Interfaces<'static>,
-    controller: &'static mut WifiController<'static>,
-) {
+async fn csi_collection(controller: &'static mut WifiController<'static>) {
     loop {
         // Wait for a start signal from the CLI — or a restart request, which
         // this task must service because it owns the WiFi controller (the
@@ -710,13 +714,9 @@ async fn csi_collection(
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
 
-        // The collection mode the user asked for. Only the modes that admit a choice take it;
+        // The reporting policy the user asked for. Only the modes that admit a choice take it;
         // where a mode fixes the attribute there is no setter to hand it to.
-        let collection_mode = if user_config.collection_collector {
-            esp_csi_rs::CollectionMode::Collector
-        } else {
-            esp_csi_rs::CollectionMode::Listener
-        };
+        let reporting = user_config.reporting;
 
         // Map NodeMode → an operational mode. The configured channel and the per-mode builders
         // flow through here so a user who sets `set-wifi --set-channel=6` then `start`s gets
@@ -727,43 +727,47 @@ async fn csi_collection(
         // collection mode only for the modes that admit a choice (ESP-NOW, station, access point).
         // Every other mode fixes both, so there is nothing to set.
         let mode = match user_config.node_mode {
-            NodeMode::WifiSniffer => OperationalMode::Sniffer(
-                WifiSnifferConfig::default().with_channel(user_config.channel),
-            ),
-            NodeMode::WifiStation => {
-                let auth = if user_config.sta_password.is_empty() {
-                    AuthenticationMethod::None
-                } else {
-                    AuthenticationMethod::Wpa2Personal
-                };
-                let mut client_config = StationConfig::default()
-                    .with_ssid(user_config.sta_ssid.as_str().to_string())
-                    .with_auth_method(auth);
-                if !user_config.sta_password.is_empty() {
-                    client_config = client_config
-                        .with_password(user_config.sta_password.as_str().to_string());
+            NodeMode::WifiSniffer => {
+                // A sniffer cannot be told `Never` (a sniffer that reports nothing observes
+                // nothing), so only the rate-limiting policies reach it; `listener` is ignored.
+                let mut sniffer = WifiSnifferConfig::default().with_channel(user_config.channel);
+                match reporting {
+                    ReportingPolicy::Threshold(t) => sniffer = sniffer.with_threshold(t),
+                    ReportingPolicy::Decimate(n) => sniffer = sniffer.with_decimation(n),
+                    _ => {}
                 }
+                OperationalMode::Sniffer(sniffer)
+            }
+            NodeMode::WifiStation => {
+                let (ssid, auth) =
+                    ssid_and_auth(&user_config.sta_ssid, &user_config.sta_password);
+                let client_config = StationConfig::default()
+                    .with_ssid(ssid)
+                    .with_authentication(auth);
                 // The hint pins the C5's radio band, so it has to be the target AP's
                 // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
                 // default therefore makes a 2.4 GHz AP invisible unless overridden.
                 OperationalMode::Station(
                     WifiStationConfig::new(client_config)
                         .with_channel_hint(user_config.channel)
-                        .with_collection_mode(collection_mode),
+                        .with_reporting(reporting),
                 )
             }
             NodeMode::WifiAccessPoint => OperationalMode::AccessPoint(
-                build_wifi_ap_config(&user_config).with_collection_mode(collection_mode),
+                build_wifi_ap_config(&user_config).with_reporting(reporting),
             ),
             NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
-                let bandwidth = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
-                    HtBandwidth::Ht40Above
+                let phy = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
+                    EmitterPhy::Ht40Above
                 } else {
-                    HtBandwidth::Ht20
+                    EmitterPhy::Ht20
                 };
+                // `--he20=on` replaces either HT PHY with HE20 (802.11ax SU, 20 MHz).
+                #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+                let phy = if user_config.he20 { EmitterPhy::He20 } else { phy };
                 // `--peer-mac` is the injection destination here (default broadcast); in the
                 // ESP-NOW modes below the same field is the explicit pairing address instead.
-                let mut emitter = EmitterConfig::new(user_config.channel, bandwidth)
+                let mut emitter = EmitterConfig::new(user_config.channel, phy)
                     .with_period(Duration::from_micros(user_config.inject_period_us as u64));
                 if let Some(mac) = user_config.peer_mac {
                     emitter = emitter.with_dst_mac(mac);
@@ -777,12 +781,12 @@ async fn csi_collection(
             NodeMode::EspNowCentral => OperationalMode::EspNow(
                 build_espnow_config(&user_config)
                     .with_network_role(NetworkRole::Central)
-                    .with_collection_mode(collection_mode),
+                    .with_reporting(reporting),
             ),
             NodeMode::EspNowPeripheral => OperationalMode::EspNow(
                 build_espnow_config(&user_config)
                     .with_network_role(NetworkRole::Peripheral)
-                    .with_collection_mode(collection_mode),
+                    .with_reporting(reporting),
             ),
             // The simplex ends changed sides in esp-csi-rs 0.11: the end that floods sources the
             // traffic and is therefore the central, and the end that beacons and then only
@@ -822,7 +826,7 @@ async fn csi_collection(
         };
 
         // Build hardware handle and construct the CSI node
-        let hardware = NodeHardware::new(&mut interfaces, controller);
+        let hardware = NodeHardware::new(controller);
         let mut node = CSINode::new(mode, Some(user_config.csi_config), traffic_freq, hardware);
         // CSI delivery gate: `false` keeps capture (and its timing) running but
         // decodes/logs nothing. No effect on an emitter, which captures nothing.
@@ -936,9 +940,9 @@ async fn radio_off_and_restart(controller: &mut WifiController<'static>) -> ! {
 /// software equivalent of the EN button.
 fn rwdt_full_system_reset() -> ! {
     use esp_hal::rtc_cntl::{Rtc, RwdtStage, RwdtStageAction};
-    // Stealing LPWR is sound here: this function diverges into a chip reset,
+    // Stealing RTC_TIMER is sound here: this function diverges into a chip reset,
     // so no other owner can observe the aliased peripheral afterwards.
-    let mut rtc = Rtc::new(unsafe { esp_hal::peripherals::LPWR::steal() });
+    let mut rtc = Rtc::new(unsafe { esp_hal::peripherals::RTC_TIMER::steal() });
     rtc.rwdt.set_stage_action(RwdtStage::Stage0, RwdtStageAction::ResetSystem);
     rtc.rwdt
         .set_timeout(RwdtStage::Stage0, esp_hal::time::Duration::from_millis(50));

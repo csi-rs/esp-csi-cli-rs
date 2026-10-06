@@ -41,9 +41,11 @@ pub fn enter_root(
     set-csi-filter          Restrict delivered CSI by source MAC and/or PHY class.
     set-log-mode            Set the CSI output logging format (text, array-list, serialized).
     set-csi                 Configure CSI feature flags (e.g., LLTF, HTLTF).
-    set-rate                Record the Wi-Fi PHY rate (reporting only).
+    set-rate                Set the Wi-Fi PHY rate (applied on the ESP-NOW pair).
     set-io-tasks            Toggle TX and/or RX direction tasks.
     set-csi-delivery        Switch CSI delivery mode and inline log gate.
+    set-reporting           Set the reporting policy (always, never, threshold, decimate).
+    set-session             Name the measurement session (id, wall-clock epoch).
     start                   Start the CSI collection process with a defined duration.
     show-config             Display the current configuration settings.
     show-stats              Print runtime CSI / traffic counters (statistics feature).

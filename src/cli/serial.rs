@@ -9,7 +9,7 @@ use esp_hal::uart::Uart;
     feature = "esp32c6",
     feature = "esp32s3"
 ))]
-use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 
 /// Serial interface type used by the CLI runner on ESP32 targets.
 ///
