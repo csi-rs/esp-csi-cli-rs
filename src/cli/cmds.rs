@@ -3,11 +3,13 @@ use core::sync::atomic::Ordering;
 use embedded_io::Write;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
-use esp_csi_rs::{CsiDeliveryMode, set_csi_delivery_mode, set_csi_logging_enabled};
+use esp_csi_rs::{
+    CsiDeliveryMode, ReportingPolicy, set_csi_delivery_mode, set_csi_logging_enabled,
+};
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
-    get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz, get_total_rx_packets,
-    get_total_tx_packets, get_tx_rate_hz,
+    get_drop_breakdown, get_dropped_packets_rx, get_pps_rx, get_pps_tx, get_rx_rate_hz,
+    get_total_rx_packets, get_total_tx_packets, get_tx_rate_hz,
 };
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{Protocol, SecondaryChannel};
@@ -28,7 +30,11 @@ use crate::{
 /// pins per-device tasks to this stable serial number rather than the
 /// `/dev/ttyACM*` path, so a `restart` and the USB re-enumeration it triggers
 /// re-bind to the same physical board whatever device node it returns as.
-pub const CLI_PROTOCOL_VERSION: u32 = 2;
+///
+/// v3: esp-csi-rs 0.12. `set-log-mode --mode=serialized` now emits the versioned
+/// `esp_csi_rs::wire` format, which a v2 host decoder cannot read. The `info`
+/// grammar itself is unchanged; the bump lets hosts refuse a decoder mismatch.
+pub const CLI_PROTOCOL_VERSION: u32 = 3;
 
 /// Read the factory base MAC address from eFuse.
 ///
@@ -129,18 +135,56 @@ fn parse_on_off(s: &str) -> Option<bool> {
     }
 }
 
-/// The collection mode the next run will use, as printed by `show-config` and `set-wifi`.
-///
-/// Only ESP-NOW, station and access point read `--collection`; every other mode fixes the
-/// attribute, so the fixed value is shown rather than a setting the mode ignores.
-fn collection_mode_str(cfg: &UserConfig) -> &'static str {
-    match cfg.node_mode {
-        NodeMode::WifiSniffer | NodeMode::EspNowFastCollector => "collector (fixed by mode)",
-        NodeMode::Ht20Emitter | NodeMode::Ht40Emitter | NodeMode::EspNowFastSource => {
-            "listener (fixed by mode)"
+/// Human-readable form of a reporting policy: `collector`, `listener`, `threshold (...)` or
+/// `decimate (...)`. The first two keep the pre-0.12 `--collection` vocabulary.
+fn policy_str(policy: ReportingPolicy) -> heapless::String<48> {
+    let mut out = heapless::String::new();
+    let _ = match policy {
+        ReportingPolicy::Always => core::fmt::Write::write_str(&mut out, "collector"),
+        ReportingPolicy::Never => core::fmt::Write::write_str(&mut out, "listener"),
+        ReportingPolicy::Threshold(t) => core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("threshold (level={}, hold={}ms)", t.level, t.hold_ms),
+        ),
+        ReportingPolicy::Decimate(n) => {
+            core::fmt::Write::write_fmt(&mut out, format_args!("decimate (every {})", n))
         }
-        _ if cfg.collection_collector => "collector",
-        _ => "listener",
+        _ => core::fmt::Write::write_str(&mut out, "other"),
+    };
+    out
+}
+
+/// The reporting policy the next run will use, as printed by `show-config` and `set-wifi`.
+///
+/// ESP-NOW, station and access point take any policy. A sniffer takes all but `listener`. Every
+/// other mode fixes the attribute, so the fixed value is shown rather than a setting it ignores.
+fn collection_mode_str(cfg: &UserConfig) -> heapless::String<48> {
+    let fixed = |s: &str| {
+        let mut out = heapless::String::new();
+        let _ = out.push_str(s);
+        out
+    };
+    match cfg.node_mode {
+        NodeMode::EspNowFastCollector => fixed("collector (fixed by mode)"),
+        NodeMode::Ht20Emitter | NodeMode::Ht40Emitter | NodeMode::EspNowFastSource => {
+            fixed("listener (fixed by mode)")
+        }
+        NodeMode::WifiSniffer if cfg.reporting == ReportingPolicy::Never => {
+            fixed("collector (a sniffer cannot listen)")
+        }
+        _ => policy_str(cfg.reporting),
+    }
+}
+
+/// Parse a `--collection=` / `--policy=` value against the stored threshold / decimation
+/// parameters. `collector`/`listener` are the pre-0.12 spellings of `always`/`never`.
+fn parse_policy(s: &str, cfg: &UserConfig) -> Option<ReportingPolicy> {
+    match s.to_ascii_lowercase().as_str() {
+        "collector" | "always" => Some(ReportingPolicy::Always),
+        "listener" | "never" => Some(ReportingPolicy::Never),
+        "threshold" => Some(ReportingPolicy::Threshold(cfg.threshold)),
+        "decimate" => Some(ReportingPolicy::Decimate(cfg.decimate_n)),
+        _ => None,
     }
 }
 
@@ -160,6 +204,9 @@ fn collection_mode_str(cfg: &UserConfig) -> &'static str {
 /// - `--preset=<default>`         — Apply a CSI acquisition preset.
 /// - `--csi-force-lltf=<on|off>`  — Force L-LTF acquisition (ESP32-C5 only).
 /// - `--csi-vht=<on|off>`         — VHT-LTF for VHT20 PPDUs (ESP32-C5 only).
+/// - `--csi-su` / `--csi-mu` / `--csi-dcm` / `--csi-beamformed` / `--csi-he-stbc=<on|off>`
+///   — HE-LTF acquisition per HE PPDU kind.
+/// - `--preset=<default|he20>`    — `he20` is HE-LTF only (`CsiConfig::he20()`).
 /// - `--dump-ack=<on|off>`        — Dump 802.11 ACK frames (default: on).
 ///
 /// Prints the updated CSI configuration after applying changes.
@@ -191,6 +238,11 @@ pub fn set_csi<'a>(
     apply_flag!("csi-ht20", acquire_csi_ht20);
     apply_flag!("csi-ht40", acquire_csi_ht40);
     apply_flag!("dump-ack", dump_ack_en);
+    apply_flag!("csi-su", acquire_csi_su);
+    apply_flag!("csi-mu", acquire_csi_mu);
+    apply_flag!("csi-dcm", acquire_csi_dcm);
+    apply_flag!("csi-beamformed", acquire_csi_beamformed);
+    apply_flag!("csi-he-stbc", acquire_csi_he_stbc);
 
     #[cfg(feature = "esp32c5")]
     {
@@ -224,7 +276,11 @@ pub fn set_csi<'a>(
                 config.borrow_mut().as_mut().unwrap().csi_config =
                     esp_csi_rs::config::CsiConfig::default();
             }),
-            _ => writeln!(serial, "Invalid --preset value '{}' (use default)", v).unwrap(),
+            "he20" => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().csi_config =
+                    esp_csi_rs::config::CsiConfig::he20();
+            }),
+            _ => writeln!(serial, "Invalid --preset value '{}' (use default|he20)", v).unwrap(),
         }
     }
 
@@ -290,6 +346,20 @@ pub fn set_csi<'a>(
             config.borrow().as_ref().unwrap().csi_config.dump_ack_en
         )
         .unwrap();
+        {
+            let cfg = config.borrow();
+            let c = &cfg.as_ref().unwrap().csi_config;
+            writeln!(
+                serial,
+                "HE-LTF: SU={} MU={} DCM={} Beamformed={} HE-STBC={}",
+                c.acquire_csi_su,
+                c.acquire_csi_mu,
+                c.acquire_csi_dcm,
+                c.acquire_csi_beamformed,
+                c.acquire_csi_he_stbc
+            )
+            .unwrap();
+        }
         #[cfg(feature = "esp32c5")]
         {
             writeln!(
@@ -641,14 +711,33 @@ pub fn set_wifi<'a>(
     // choice read it; on the ESP-NOW modes it also goes on the wire, so a peripheral paired with a
     // listening central can promote itself.
     if let Ok(Some(v)) = argument_finder(item, args, "collection") {
-        match v.to_ascii_lowercase().as_str() {
-            "collector" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().collection_collector = true;
+        let ok = USER_CONFIG.lock(|config| {
+            let mut cfg = config.borrow_mut();
+            let cfg = cfg.as_mut().unwrap();
+            match parse_policy(v, cfg) {
+                Some(p) => {
+                    cfg.reporting = p;
+                    true
+                }
+                None => false,
+            }
+        });
+        if !ok {
+            writeln!(
+                serial,
+                "Invalid --collection (use collector|listener|threshold|decimate)"
+            )
+            .unwrap();
+        }
+    }
+    // HE20 (802.11ax SU) on the emitter modes and the ESP-NOW central/peripheral pair.
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    if let Ok(Some(v)) = argument_finder(item, args, "he20") {
+        match parse_on_off(v) {
+            Some(b) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().he20 = b;
             }),
-            "listener" => USER_CONFIG.lock(|config| {
-                config.borrow_mut().as_mut().unwrap().collection_collector = false;
-            }),
-            _ => writeln!(serial, "Invalid --collection (use collector|listener)").unwrap(),
+            None => writeln!(serial, "Invalid --he20 (use on|off)").unwrap(),
         }
     }
     if let Ok(Some(s)) = argument_finder(item, args, "inject-period-us") {
@@ -737,6 +826,8 @@ pub fn set_wifi<'a>(
         writeln!(serial, "Secondary Channel: {}", ht40_str).unwrap();
         writeln!(serial, "Emitter Period: {}us", cfg.inject_period_us).unwrap();
         writeln!(serial, "Collection: {}", collection_mode_str(cfg)).unwrap();
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        writeln!(serial, "HE20: {}", cfg.he20).unwrap();
     });
 }
 
@@ -1061,10 +1152,19 @@ pub fn show_config<'a>(
             _ => "HT20/legacy",
         };
         writeln!(serial, "  AP 2nd  : {}", ht40_str).unwrap();
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        writeln!(serial, "  HE20    : {}", cfg.he20).unwrap();
 
         // Collection settings
         writeln!(serial, "\n[Collection]").unwrap();
         writeln!(serial, "  Collection    : {}", collection_mode_str(cfg)).unwrap();
+        writeln!(
+            serial,
+            "  Threshold     : level={}, hold={}ms; Decimate n={}",
+            cfg.threshold.level, cfg.threshold.hold_ms, cfg.decimate_n
+        )
+        .unwrap();
+        writeln!(serial, "  Session ID    : {}", esp_csi_rs::session_id()).unwrap();
         writeln!(serial, "  CSI Output    : {}", cfg.csi_output_enabled).unwrap();
         match cfg.csi_peer_filter {
             Some(m) => writeln!(
@@ -1130,6 +1230,21 @@ pub fn show_config<'a>(
                 serial,
                 "  Dump ACK           : {}",
                 cfg.csi_config.dump_ack_en
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  HE-LTF SU/MU/DCM   : {}/{}/{}",
+                cfg.csi_config.acquire_csi_su,
+                cfg.csi_config.acquire_csi_mu,
+                cfg.csi_config.acquire_csi_dcm
+            )
+            .unwrap();
+            writeln!(
+                serial,
+                "  HE-LTF BF/HE-STBC  : {}/{}",
+                cfg.csi_config.acquire_csi_beamformed,
+                cfg.csi_config.acquire_csi_he_stbc
             )
             .unwrap();
             #[cfg(feature = "esp32c5")]
@@ -1279,7 +1394,8 @@ pub fn set_phy_rate<'a>(
 /// node via `CSINode::set_protocol` at the start of each collection run.
 ///
 /// # Options
-/// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`.
+/// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`, and `ax` on the ESP32-C5/C6
+///   (802.11ax; esp-csi-rs runs the HE20 bring-up for station, wifi-ap and sniffer).
 ///
 /// `lr` (Espressif long-range) is the default and suits sniffer links between ESP
 /// devices; use `n` when associating to a standard AP in station mode.
@@ -1299,10 +1415,12 @@ pub fn set_protocol_cmd<'a>(
             "lr" => Some(Protocol::LR),
             "a" => Some(Protocol::A),
             "ac" => Some(Protocol::AC),
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            "ax" => Some(Protocol::AX),
             _ => None,
         },
         _ => {
-            writeln!(serial, "Usage: set-protocol --protocol=<b|g|n|lr|a|ac>").unwrap();
+            writeln!(serial, "Usage: set-protocol --protocol=<b|g|n|lr|a|ac|ax>").unwrap();
             return;
         }
     };
@@ -1314,7 +1432,7 @@ pub fn set_protocol_cmd<'a>(
         None => {
             writeln!(
                 serial,
-                "Invalid protocol. Use one of: b, g, n, lr (default), a, ac."
+                "Invalid protocol. Use one of: b, g, n, lr (default), a, ac, ax (C5/C6)."
             )
             .unwrap();
         }
@@ -1659,5 +1777,130 @@ pub fn show_stats<'a>(
     writeln!(serial, "  RX Rate (Hz)     : {}", get_rx_rate_hz()).unwrap();
     writeln!(serial, "  TX Rate (Hz)     : {}", get_tx_rate_hz()).unwrap();
     writeln!(serial, "  RX Dropped Pkts  : {}", get_dropped_packets_rx()).unwrap();
+    // Losses (oversize, queue full, sequence gaps) sum to `RX Dropped Pkts`. Filtered and
+    // policy-suppressed frames are deliberate and no longer counted as drops (esp-csi-rs 0.12).
+    let d = get_drop_breakdown();
+    writeln!(serial, "    oversize       : {}", d.oversize).unwrap();
+    writeln!(serial, "    queue full     : {}", d.queue_full).unwrap();
+    writeln!(serial, "    sequence gaps  : {}", d.seq_gap).unwrap();
+    writeln!(serial, "  RX Filtered      : {}", d.filtered).unwrap();
+    writeln!(serial, "  RX Policy Supp.  : {}", d.policy_suppressed).unwrap();
+    writeln!(serial, "  Log Dropped      : {}", d.log_dropped).unwrap();
     writeln!(serial, "================================\n").unwrap();
+}
+
+/// CLI command: `set-reporting`
+///
+/// Sets the node's reporting policy and its parameters. A superset of
+/// `set-wifi --collection=`, which picks the policy but not its parameters.
+///
+/// # Options
+/// - `--policy=<always|never|threshold|decimate>` — `collector`/`listener` are accepted for
+///   `always`/`never`.
+/// - `--level=<0-65535>` — threshold score at or above which a measurement is reported.
+/// - `--hold-ms=<ms>` — how long to keep reporting after a measurement crosses `level`.
+/// - `--n=<N>` — decimation: report every N-th measurement.
+///
+/// Parameters are stored even when another policy is active, and take effect immediately when the
+/// matching policy already is.
+pub fn set_reporting_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    USER_CONFIG.lock(|config| {
+        let mut cfg = config.borrow_mut();
+        let cfg = cfg.as_mut().unwrap();
+        if let Ok(Some(v)) = argument_finder(item, args, "level") {
+            match v.parse::<u16>() {
+                Ok(l) => cfg.threshold.level = l,
+                Err(_) => writeln!(serial, "Invalid --level (use 0-65535)").unwrap(),
+            }
+        }
+        if let Ok(Some(v)) = argument_finder(item, args, "hold-ms") {
+            match v.parse::<u16>() {
+                Ok(h) => cfg.threshold.hold_ms = h,
+                Err(_) => writeln!(serial, "Invalid --hold-ms (use 0-65535)").unwrap(),
+            }
+        }
+        if let Ok(Some(v)) = argument_finder(item, args, "n") {
+            match v.parse::<u16>() {
+                Ok(n) if n > 0 => cfg.decimate_n = n,
+                _ => writeln!(serial, "Invalid --n (use 1-65535)").unwrap(),
+            }
+        }
+        // Re-derive an active parameterised policy so new parameters apply without restating it.
+        match cfg.reporting {
+            ReportingPolicy::Threshold(_) => {
+                cfg.reporting = ReportingPolicy::Threshold(cfg.threshold)
+            }
+            ReportingPolicy::Decimate(_) => cfg.reporting = ReportingPolicy::Decimate(cfg.decimate_n),
+            _ => {}
+        }
+        if let Ok(Some(v)) = argument_finder(item, args, "policy") {
+            match parse_policy(v, cfg) {
+                Some(p) => cfg.reporting = p,
+                None => writeln!(
+                    serial,
+                    "Invalid --policy (use always|never|threshold|decimate)"
+                )
+                .unwrap(),
+            }
+        }
+        writeln!(serial, "\nReporting: {}", collection_mode_str(cfg)).unwrap();
+    });
+}
+
+/// CLI command: `set-session`
+///
+/// Names the measurement session (`esp_csi_rs::set_session`). The id is stamped on every
+/// serialized frame's envelope from now on, across runs, until changed or the board resets.
+///
+/// # Options
+/// - `--id=<u32>` — session id, decimal or `0x`-prefixed hex. Required.
+/// - `--epoch=<unix_us>` — the current UNIX time in microseconds. Anchors the session to wall
+///   time: the next run announces it in its `SessionInfo` frame. Omit to announce no wall time.
+pub fn set_session_cmd<'a>(
+    _menu: &Menu<SerialInterface, Context>,
+    item: &Item<SerialInterface, Context>,
+    args: &[&str],
+    serial: &mut SerialInterface,
+    _context: &mut Context,
+) {
+    let id = match argument_finder(item, args, "id") {
+        Ok(Some(v)) => {
+            let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                None => v.parse::<u32>().ok(),
+            };
+            match parsed {
+                Some(id) => id,
+                None => {
+                    writeln!(serial, "Invalid --id (use a u32, decimal or 0x hex)").unwrap();
+                    return;
+                }
+            }
+        }
+        _ => {
+            writeln!(serial, "Usage: set-session --id=<u32> [--epoch=<unix_us>]").unwrap();
+            return;
+        }
+    };
+    let epoch = match argument_finder(item, args, "epoch") {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(us) => Some(us),
+            Err(_) => {
+                writeln!(serial, "Invalid --epoch (use UNIX time in microseconds)").unwrap();
+                return;
+            }
+        },
+        _ => None,
+    };
+    esp_csi_rs::set_session(id, epoch);
+    match epoch {
+        Some(us) => writeln!(serial, "\nSession: id={}, epoch={}us", id, us).unwrap(),
+        None => writeln!(serial, "\nSession: id={}, no wall-clock anchor", id).unwrap(),
+    }
 }

@@ -4,7 +4,7 @@ use core::sync::atomic::AtomicBool;
 use embassy_sync::{
     blocking_mutex::Mutex, blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal,
 };
-use esp_csi_rs::{IOTaskConfig, config::CsiConfig};
+use esp_csi_rs::{IOTaskConfig, ReportingPolicy, Threshold, config::CsiConfig};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{Protocol, SecondaryChannel};
 use heapless::String;
@@ -60,17 +60,26 @@ pub struct UserConfig {
     /// captures — RX path and timing unchanged — but nothing is decoded or logged
     /// (`esp_csi_rs::set_csi_output_enabled`). Set via `set-csi-output --enabled=`.
     pub csi_output_enabled: bool,
-    /// The node's **collection mode** — whether its measurements leave it. `false` is
-    /// `CollectionMode::Listener`: it captures and reports nothing.
+    /// The node's **reporting policy** — whether, and how often, its measurements leave it.
+    /// `Always` is the old *collector*, `Never` the old *listener* (captures, reports nothing);
+    /// `Threshold` reports only while the channel moves and `Decimate(n)` every n-th measurement.
     ///
     /// Distinct from `csi_output_enabled`, which is the *runtime* delivery gate. This one is part
     /// of the node's configuration and, on the ESP-NOW modes, is announced on the wire
     /// (`ControlPacket::is_collector`) so a peripheral paired with a listening central promotes
-    /// itself. Set via `set-wifi --collection=collector|listener`.
+    /// itself. Set via `set-wifi --collection=` or `set-reporting --policy=`.
     ///
-    /// Only the modes that admit a choice read it — a sniffer is always a collector and an emitter
-    /// always a listener, so the setting is ignored there rather than silently believed.
-    pub collection_collector: bool,
+    /// Read by ESP-NOW central/peripheral, station and wifi-ap. A sniffer takes only `Threshold`
+    /// and `Decimate` (it cannot be a listener); the other modes fix the attribute and ignore it.
+    pub reporting: ReportingPolicy,
+    /// Parameters applied when the policy is set to `threshold` (`set-reporting --level= --hold-ms=`).
+    pub threshold: Threshold,
+    /// `n` applied when the policy is set to `decimate` (`set-reporting --n=`).
+    pub decimate_n: u16,
+    /// Force HE20 (802.11ax SU, 20 MHz) on the emitter modes and the ESP-NOW central/peripheral
+    /// pair. Only the ESP32-C5 and C6 have an 802.11ax PHY. Set via `set-wifi --he20=on|off`.
+    #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+    pub he20: bool,
     /// Restrict delivered CSI to this source MAC. `None` = accept every source.
     ///
     /// A collector is promiscuous: it reports CSI for the AP's beacons and ACKs and for any
@@ -182,10 +191,13 @@ impl core::fmt::Debug for UserConfig {
             Some(SecondaryChannel::Below) => "Below",
             _ => "None",
         };
-        f.debug_struct("UserConfig")
+        let mut d = f.debug_struct("UserConfig");
+        d
             .field("node_mode", &self.node_mode)
             .field("csi_output_enabled", &self.csi_output_enabled)
-            .field("collection_collector", &self.collection_collector)
+            .field("reporting", &self.reporting)
+            .field("threshold", &self.threshold)
+            .field("decimate_n", &self.decimate_n)
             .field("csi_peer_filter", &self.csi_peer_filter)
             .field("csi_min_sig_mode", &self.csi_min_sig_mode)
             .field("trigger_freq", &self.trigger_freq)
@@ -206,8 +218,10 @@ impl core::fmt::Debug for UserConfig {
             .field("ht40_secondary", &ht40_str)
             .field("delivery_raw", &self.delivery_raw)
             .field("inject_period_us", &self.inject_period_us)
-            .field("emitter_use_sta_if", &self.emitter_use_sta_if)
-            .finish()
+            .field("emitter_use_sta_if", &self.emitter_use_sta_if);
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        d.field("he20", &self.he20);
+        d.finish()
     }
 }
 
@@ -218,6 +232,7 @@ impl UserConfig {
     /// |-------------------|------------------------|
     /// | `node_mode`       | `WifiSniffer`          |
     /// | `csi_output_enabled` | `true`              |
+    /// | `reporting`       | `Always` (collector)   |
     /// | `csi_peer_filter` | `None` (any source)    |
     /// | `csi_min_sig_mode` | `0` (any PHY)         |
     /// | `trigger_freq`    | `100` Hz               |
@@ -238,7 +253,13 @@ impl UserConfig {
         UserConfig {
             node_mode: NodeMode::WifiSniffer,
             csi_output_enabled: true,
-            collection_collector: true,
+            reporting: ReportingPolicy::Always,
+            // Uncalibrated starting point: a still room scores ~2700 median / ~4300 p99 on two
+            // C5s at HE20 (esp-csi-rs `Threshold` docs). Calibrate `level` on your own link.
+            threshold: Threshold::new(6000, 1000),
+            decimate_n: 2,
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            he20: false,
             csi_peer_filter: None,
             csi_min_sig_mode: 0,
             trigger_freq: 100,

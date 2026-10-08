@@ -5,7 +5,7 @@ Every command the firmware accepts on the serial console.
 ## CLI Commands
 
 This is a list of commands available through the CLI interface:
-> 📝 The `set-csi` command options differ on the ESP32-C5 and ESP32-C6 (which expose per-PPDU-format acquisition flags — legacy / HT20 / HT40, plus VHT20 and forced L-LTF on C5 — instead of the classic LLTF/HTLTF flags).
+> 📝 The `set-csi` command options differ on the ESP32-C5 and ESP32-C6 (which expose per-PPDU-format acquisition flags — legacy / HT20 / HT40 / HE-LTF, plus VHT20 and forced L-LTF on C5 — instead of the classic LLTF/HTLTF flags).
 
 * **`help [command]`**
     * Description: Display the main help menu or details for a specific command.
@@ -45,7 +45,7 @@ This is a list of commands available through the CLI interface:
         * `set-csi-filter --peer-mac=any --min-phy=any`
     * Note: filtering on the device rather than on the host also returns console bandwidth to the
       traffic you configured — a rejected frame is dropped in the Wi-Fi callback before the packet
-      copy and before any formatting. Rejected frames are counted as RX drops in `show-stats`.
+      copy and before any formatting. Rejected frames are counted as `RX Filtered` in `show-stats`, not as drops.
 
 * **`set-log-mode [OPTIONS]`**
     * Description: Set the CSI output logging format at runtime.
@@ -53,7 +53,7 @@ This is a list of commands available through the CLI interface:
         * `--mode=<text|array-list|serialized|esp-csi-tool>`: Output format for CSI packets (default: `text`).
             * `text`: Verbose human-readable output with full metadata.
             * `array-list`: Compact CSV-style array, one line per packet — best for host-side data processing.
-            * `serialized`: Binary COBS-framed postcard format — most compact, requires a compatible deserializer on the host.
+            * `serialized`: Binary COBS-framed postcard frames in esp-csi-rs 0.12's versioned `esp_csi_rs::wire` format (`info` reports `protocol=3`) — most compact. Decode with `esp_csi_rs::wire::decode_cobs`; a decoder written for 0.11 cannot read it.
             * `esp-csi-tool`: Hernandez-style 26-column CSV (`CSI_DATA,...` lines) compatible with the ESP32-CSI-Tool collector.
     * Examples:
         * `set-log-mode --mode=text`
@@ -73,8 +73,9 @@ This is a list of commands available through the CLI interface:
         * `--csi-ht20=<on|off>`: HT-LTF for HT20 PPDUs (default: on).
         * `--csi-ht40=<on|off>`: HT-LTF for HT40 PPDUs (default: on).
         * `--val-scale-cfg=<0-3>`: Value scale configuration (default: 2).
-        * `--preset=<default>`: Apply a CSI acquisition preset.
+        * `--preset=<default|he20>`: Apply a CSI acquisition preset. `he20` acquires HE-LTF only (legacy, HT and ACK acquisition off) — use it on collectors of an HE20 link.
         * `--dump-ack=<on|off>`: Dump 802.11 ACK frames (default: on).
+        * `--csi-su`, `--csi-mu`, `--csi-dcm`, `--csi-beamformed`, `--csi-he-stbc` `=<on|off>`: HE-LTF acquisition per HE PPDU kind.
         * `--csi-force-lltf=<on|off>`: Force L-LTF acquisition (ESP32-C5 only).
         * `--csi-vht=<on|off>`: VHT-LTF for VHT20 PPDUs (ESP32-C5 only).
     * Examples:
@@ -86,14 +87,19 @@ This is a list of commands available through the CLI interface:
     * Description: Configure WiFi and network settings. **Note:** SSIDs/passwords with spaces should be wrapped in single or double quotes (e.g. `--sta-ssid='My Network'` or `--sta-ssid="My Network"`). Both quote styles are interchangeable. Underscores (`_`) are passed through literally.
     * Options:
         * `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-source|esp-now-fast-collector>`: the node's operational mode — how it reaches the channel (default: `sniffer`). The two simplex ends are also spelled `esp-now-simplex-source` and `esp-now-simplex-peer`; the `-fast-` names remain the wire contract.
-        * `--collection=<collector|listener>`: the node's **collection mode** — whether its
-          measurements leave it (default: `collector`). A listener captures and reports nothing.
+        * `--collection=<collector|listener|threshold|decimate>`: the node's **reporting policy** —
+          whether, and how often, its measurements leave it (default: `collector`). A listener
+          captures and reports nothing; `threshold` reports only while the channel moves and
+          `decimate` every n-th measurement, with the parameters set by `set-reporting`.
           This is not `set-csi-output`, which is a runtime delivery gate: on the ESP-NOW modes the
-          collection mode also goes out on the wire, which is what lets a peripheral paired with a
-          listening central promote itself. Only the modes that admit a choice read it —
-          `station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`. A sniffer is always a
-          collector, an emitter always a listener, and each simplex end is fixed by which end it
-          is, so the flag is ignored there rather than silently believed.
+          policy also goes out on the wire, which is what lets a peripheral paired with a
+          listening central promote itself. `station`, `wifi-ap`, `esp-now-central` and
+          `esp-now-peripheral` take any policy; a sniffer takes all but `listener`. An emitter is
+          always a listener and each simplex end is fixed by which end it is, so the flag is
+          ignored there rather than silently believed.
+        * `--he20=<on|off>` *(ESP32-C5/C6 only)*: force HE20 (802.11ax SU, 20 MHz). On
+          `ht20-emitter` / `ht40-emitter` it replaces the HT PHY; on `esp-now-central` /
+          `esp-now-peripheral` it overrides `--ht40`. Pair the collectors with `set-csi --preset=he20`.
         * `--sta-ssid=<SSID>`: Set the SSID for Station mode.
         * `--sta-password=<PASSWORD>`: Set the password for Station mode.
         * `--ap-ssid=<SSID>`: Set the SSID for wifi-ap mode (default: `esp-csi-ap`).
@@ -126,6 +132,27 @@ This is a list of commands available through the CLI interface:
         * `set-wifi --mode=esp-now-simplex-source --set-channel=6`
         * `set-wifi --mode=esp-now-simplex-peer --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff`
         * `set-wifi --mode=station --sta-ssid=MyAP --collection=listener`
+        * `set-wifi --mode=ht20-emitter --set-channel=6 --he20=on` (C5/C6)
+
+* **`set-reporting [OPTIONS]`**
+    * Description: Set the reporting policy and its parameters — the same setting as `set-wifi --collection=`, plus the threshold and decimation parameters. Parameters are kept when another policy is active and apply at once when the matching policy already is.
+    * Options:
+        * `--policy=<always|never|threshold|decimate>`: `collector` / `listener` are accepted for `always` / `never`.
+        * `--level=<0-65535>`: threshold score at or above which a measurement is reported (default: `6000`, uncalibrated). A still room does not score zero — two ESP32-C5s at HE20 measured a ~2700 median and ~4300 99th percentile — so calibrate it on your own link.
+        * `--hold-ms=<MS>`: how long to keep reporting after a measurement crosses `level` (default: `1000`).
+        * `--n=<N>`: decimation factor, report every n-th measurement (default: `2`).
+    * Examples:
+        * `set-reporting --policy=threshold --level=5000 --hold-ms=500`
+        * `set-reporting --policy=decimate --n=10`
+
+* **`set-session [OPTIONS]`**
+    * Description: Name the measurement session (`esp_csi_rs::set_session`). The id is stamped on every serialized frame's envelope from now on, across runs, until changed or the board resets (`reset-config` does not clear it). Without it each run draws a random id.
+    * Options:
+        * `--id=<u32>`: session id, decimal or `0x`-prefixed hex. Required.
+        * `--epoch=<unix_us>`: the current UNIX time in microseconds. The next run's first frame announces it, so a host can put every frame on wall time.
+    * Examples:
+        * `set-session --id=42`
+        * `set-session --id=0x1a2b --epoch=1791234567000000`
 
 * **`start [OPTIONS]`**
     * Description: Start the CSI collection process. Ensure the device is configured first. Press `q` (or `Q`) on the serial console at any time to stop collection early.
@@ -154,7 +181,7 @@ This is a list of commands available through the CLI interface:
 * **`set-protocol [OPTIONS]`**
     * Description: Set the Wi-Fi PHY protocol, applied to the node at the start of each collection run. Pick it to match the link: `lr` for maximum range between ESP devices, `n` when associating to a standard AP in station mode. Not every chip supports every protocol; unsupported values may be rejected by the radio at start.
     * Options:
-        * `--protocol=<b|g|n|lr|a|ac>`: The protocol (default: `lr`).
+        * `--protocol=<b|g|n|lr|a|ac|ax>`: The protocol (default: `lr`). `ax` (802.11ax) is ESP32-C5/C6 only; esp-csi-rs then runs the HE20 bring-up for `station`, `wifi-ap` and `sniffer`.
     * Examples:
         * `set-protocol --protocol=lr`
         * `set-protocol --protocol=n`
@@ -172,7 +199,7 @@ This is a list of commands available through the CLI interface:
 * **`set-csi-delivery [OPTIONS]`**
     * Description: Switch the CSI delivery mode at runtime, and independently toggle the inline UART/JTAG log gate. The two delivery paths are mutually exclusive — the WiFi callback only ever pays for one per packet.
     * Options:
-        * `--mode=<off|callback|async|raw>`: `off` drops user delivery, `callback` invokes the registered `set_csi_callback` hook inline in the WiFi callback, `async` queues to `CSINodeClient::next_csi_packet` (default for the indefinite collection path). `raw` is the zero-copy CPU-benchmark fast path: the WiFi callback returns before building the `CSIDataPacket`, so no CSI is delivered or logged. It applies on the next `start`.
+        * `--mode=<off|callback|async|raw>`: `off` drops user delivery, `callback` invokes the registered `set_csi_callback` hook inline in the WiFi callback, `async` queues to `CSINodeClient::next_csi_packet` (default for the indefinite collection path). `raw` is the zero-copy CPU-benchmark fast path: the WiFi callback returns before building the `CsiPacket`, so no CSI is delivered or logged. It applies on the next `start`.
         * `--logging=<on|off>`: Toggle the per-packet `log_csi` UART/JTAG gate independently.
     * Examples:
         * `set-csi-delivery --mode=async`
@@ -194,7 +221,7 @@ This is a list of commands available through the CLI interface:
         features=<comma-separated-list>
         END-INFO
         ```
-    * Fields: `protocol` bumps on any breaking change to this grammar (currently `2`). `mac` is the factory base MAC, stable across restarts, which host tooling pins a device to. `log` is the encoding of log frames and `transport` the console the build writes to, both fixed by the build. `baud` is the UART rate the build was compiled with.
+    * Fields: `protocol` bumps on any breaking change to this grammar or to the serialized CSI format (currently `3`: esp-csi-rs 0.12's `wire` format). `mac` is the factory base MAC, stable across restarts, which host tooling pins a device to. `log` is the encoding of log frames and `transport` the console the build writes to, both fixed by the build. `baud` is the UART rate the build was compiled with.
     * Example: `info`
 
 * **`version`**
@@ -206,5 +233,5 @@ This is a list of commands available through the CLI interface:
     * Example: `restart`
 
 * **`show-stats`** *(requires `statistics` feature, on by default)*
-    * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, and RX dropped packets. Counters reset on the start of each new `start` collection.
+    * Description: Print a one-shot snapshot of runtime CSI / traffic counters: RX/TX packet totals, average PPS, RX/TX rate in Hz, and RX dropped packets — losses only, broken down into oversize, queue full and on-air sequence gaps — plus the deliberately withheld frames (`RX Filtered` by `set-csi-filter`, `RX Policy Supp.` by a threshold/decimate policy) and the log lines the logger dropped. Counters reset on the start of each new `start` collection.
     * Example: `show-stats`

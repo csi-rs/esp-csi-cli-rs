@@ -16,16 +16,18 @@ does. Supported devices: ESP32, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S3.
 
 `set-wifi --mode=` selects the node's **operational mode** — how it reaches the channel. It is one
 of four independent attributes describing a node. The network role comes with the mode (the
-`--mode` string names the end), and the collection mode is set with `set-wifi --collection=collector|listener`
-on the modes that admit a choice (`station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`); the
-others fix it. Every node is a session responder: the host starts and stops the run.
+`--mode` string names the end), and the reporting policy is set with
+`set-wifi --collection=collector|listener|threshold|decimate` (parameters via `set-reporting`) on the
+modes that admit a choice (`station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`, and the
+sniffer for all but `listener`); the others fix it. The host controls the session: it starts and
+stops the run, and can name it with `set-session`.
 
 | Mode | Reaches the channel by |
 |---|---|
 | `station` | associating to an AP or a commercial router |
 | `sniffer` | promiscuous capture on a locked channel |
 | `wifi-ap` | a self-contained softAP with DHCP |
-| `ht20-emitter` / `ht40-emitter` | unassociated raw 802.11n injection, 20 or 40 MHz |
+| `ht20-emitter` / `ht40-emitter` | unassociated raw 802.11n injection, 20 or 40 MHz (HE20 with `--he20=on` on the C5/C6) |
 | `esp-now-central` / `esp-now-peripheral` | the symmetric connectionless exchange; both ends capture |
 | `esp-now-fast-source` / `esp-now-fast-collector` | the asymmetric exchange, at the highest achievable CSI rate. Also spelled `esp-now-simplex-source` / `esp-now-simplex-peer` |
 
@@ -42,9 +44,13 @@ This README does not restate it.
 - **CSI output gate** — `set-csi-output --enabled=false` keeps capture and its timing running while
   suppressing all decoding and logging.
 - **IO task control** — switch the TX or RX direction off to prune whole task subtrees.
-- **Statistics** — `show-stats` reports PPS, rates and drops on demand.
-- **Output formats** — human-readable text, compact array-list, binary serialized, or
-  ESP32-CSI-Tool-compatible CSV.
+- **Statistics** — `show-stats` reports PPS, rates and drops (broken down by cause) on demand.
+- **Output formats** — human-readable text, compact array-list, binary serialized (the versioned
+  `esp_csi_rs::wire` format), or ESP32-CSI-Tool-compatible CSV.
+- **Reporting policies** — report always, never, only while the channel moves (threshold), or
+  every n-th frame (decimate).
+- **802.11ax HE20 on the ESP32-C5/C6** — `--he20=on` for emitters and the ESP-NOW pair,
+  `set-protocol --protocol=ax` for station / AP / sniffer, `set-csi --preset=he20` for collectors.
 - **Timed or indefinite collection**, with `q` to stop a run early without resetting the board.
 
 ## Requirements

@@ -56,9 +56,10 @@ On a `START_SIGNAL` the task (`src/main.rs:562`):
 
 1. Snapshots `USER_CONFIG`.
 2. Maps `node_mode` → an `esp-csi-rs` `OperationalMode`. `collection` below is
-   `Collector` when `collection_collector` is set (`set-wifi --collection`),
-   otherwise `Listener`; it is passed only to the modes that admit a choice.
-   - `WifiSniffer` → `Sniffer(WifiSnifferConfig { channel })` — peripheral collector, fixed
+   the `ReportingPolicy` in `reporting` (`set-wifi --collection`, `set-reporting`);
+   it is passed only to the modes that admit a choice.
+   - `WifiSniffer` → `Sniffer(WifiSnifferConfig { channel })` — peripheral collector; takes a
+     `Threshold` / `Decimate` policy, ignores `Never`
    - `WifiStation` → `Station(WifiStationConfig { ssid, password, WPA2-Personal or open,
      channel_hint = channel, collection })`
    - `WifiAccessPoint` → `AccessPoint(WifiApConfig { ap, channel, ht40, dhcp, leases, burst,
@@ -358,8 +359,9 @@ Collection: collector (fixed by mode)
 - The simplex ends: `EspNowFastCollector` is the peer end, a peripheral
   collector; `EspNowFastSource` is the source end, a central listener. (Before
   v0.8.0 they were labelled the other way round; on-air behaviour is unchanged.)
-- `--collection`: `collector` → `collection_collector = true`, `listener` →
-  `false`; anything else prints `Invalid --collection (use collector|listener)`.
+- `--collection`: `collector` → `reporting = Always`, `listener` → `Never`,
+  `threshold` / `decimate` → the policy with the stored `set-reporting` parameters;
+  anything else prints `Invalid --collection (use collector|listener|threshold|decimate)`.
   Modes that fix their collection mode ignore it, and the confirmation line
   says `(fixed by mode)` for them.
 - Channel parsed as `u8`; non-numeric prints `Invalid Max Connections`
@@ -796,7 +798,7 @@ proprietary-only mode string and reading the rejection.
 |-------------------|----------------------------------|
 | `node_mode`       | `WifiSniffer`                    |
 | `csi_output_enabled` | `true`                        |
-| `collection_collector` | `true` (collector)          |
+| `reporting`       | `Always` (collector)             |
 | `csi_peer_filter` | `None` (any source)              |
 | `csi_min_sig_mode` | `0` (any PHY)                   |
 | `trigger_freq`    | `100` Hz                         |
