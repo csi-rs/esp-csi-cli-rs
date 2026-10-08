@@ -127,10 +127,6 @@ esp-csi-rs = { version = "0.12", default-features = false }
 menu = { version = "0.6.1", default-features = false }
 embedded-io = "0.6.1"
 
-# esp-csi-rs 0.12 is not on crates.io yet; drop this patch once it is published.
-[patch.crates-io]
-esp-csi-rs = { path = "../esp-csi-rs" }
-
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
