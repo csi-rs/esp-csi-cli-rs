@@ -14,13 +14,15 @@ does. Supported devices: ESP32, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S3.
 
 ## The node model
 
-`set-wifi --mode=` selects the node's **operational mode** — how it reaches the channel. It is one
-of four independent attributes describing a node. The network role comes with the mode (the
-`--mode` string names the end), and the reporting policy is set with
-`set-wifi --collection=collector|listener|threshold|decimate` (parameters via `set-reporting`) on the
-modes that admit a choice (`station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`, and the
-sniffer for all but `listener`); the others fix it. The host controls the session: it starts and
-stops the run, and can name it with `set-session`.
+The CLI uses IEEE 802.11bf terms. `set-wifi --mode=` selects the node's **mode** — how it reaches
+the channel. The **session role** (initiator, responder, or none for an observer) comes with the
+mode (the `--mode` token names the end), and so does the **sensing role** (transmitter, receiver,
+or both). The **reporting** is set with `set-wifi --reporting=report|none|threshold|decimate`
+(`--report-to=host|local`; parameters via `set-reporting`) on the modes that admit a choice
+(`station`, `wifi-ap`, `esp-now-initiator`, `esp-now-responder`, and the sniffer for all but
+`none`); the others fix it. The **measurement setup** (`set-measurement --periodicity-hz=`) sets the
+rate of the sounding traffic. The host is the controller: it starts and stops the run, and can
+name it with `set-session`. `show-config` prints all of these for the next run.
 
 | Mode | Reaches the channel by |
 |---|---|
@@ -28,8 +30,8 @@ stops the run, and can name it with `set-session`.
 | `sniffer` | promiscuous capture on a locked channel |
 | `wifi-ap` | a self-contained softAP with DHCP |
 | `ht20-emitter` / `ht40-emitter` | unassociated raw 802.11n injection, 20 or 40 MHz (HE20 with `--he20=on` on the C5/C6) |
-| `esp-now-central` / `esp-now-peripheral` | the symmetric connectionless exchange; both ends capture |
-| `esp-now-fast-source` / `esp-now-fast-collector` | the asymmetric exchange, at the highest achievable CSI rate. Also spelled `esp-now-simplex-source` / `esp-now-simplex-peer` |
+| `esp-now-initiator` / `esp-now-responder` | the symmetric connectionless exchange; both ends capture |
+| `esp-now-simplex-source` / `esp-now-simplex-peer` | the asymmetric exchange, at the highest achievable CSI rate |
 
 The model is documented once, in
 [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
@@ -37,7 +39,7 @@ This README does not restate it.
 
 ## Features
 
-- **Traffic generation** at a configurable rate.
+- **Traffic generation** at a configurable periodicity.
 - **Fine-grained CSI control** — LLTF, HTLTF, STBC HTLTF, LTF merge, and the per-chip acquisition
   knobs.
 - **Runtime delivery switching** between async-queued, inline callback and off, without reflashing.
@@ -47,10 +49,10 @@ This README does not restate it.
 - **Statistics** — `show-stats` reports PPS, rates and drops (broken down by cause) on demand.
 - **Output formats** — human-readable text, compact array-list, binary serialized (the versioned
   `esp_csi_rs::wire` format), or ESP32-CSI-Tool-compatible CSV.
-- **Reporting policies** — report always, never, only while the channel moves (threshold), or
-  every n-th frame (decimate).
+- **Reporting** — report every measurement (to the host or only on-device), none, only while the
+  channel moves (802.11bf threshold-based reporting), or every n-th frame (decimate).
 - **802.11ax HE20 on the ESP32-C5/C6** — `--he20=on` for emitters and the ESP-NOW pair,
-  `set-protocol --protocol=ax` for station / AP / sniffer, `set-csi --preset=he20` for collectors.
+  `set-protocol --protocol=ax` for station / AP / sniffer, `set-csi --preset=he20` for receivers.
 - **Timed or indefinite collection**, with `q` to stop a run early without resetting the board.
 
 ## Requirements
@@ -107,7 +109,7 @@ Flashing is needed once. Afterwards `espflash monitor` reconnects; `ctrl+R` rese
 - **On the ESP32-C5, a 5 GHz sniffer can return a frozen IQ buffer** (a driver bug). Use the
   `wifi-ap` + `station` pair instead.
 - For high-rate capture: `set-log-mode --mode=serialized`, `set-io-tasks --tx=off` on the station,
-  and `set-traffic --frequency-hz=4000` on the AP. Avoid `set-csi-delivery --mode=callback` during
+  and `set-measurement --periodicity-hz=4000` on the AP. Avoid `set-csi-delivery --mode=callback` during
   capture — it caps output near 10 Hz. See [`docs/throughput.md`](docs/throughput.md).
 - `q` stops a running collection, including an indefinite one. It is polled by the main loop every
   5 ms, not from the Wi-Fi callback.
