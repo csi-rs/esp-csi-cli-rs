@@ -10,7 +10,7 @@ use crate::cli::cmds::show_stats;
 use crate::cli::cmds::{
     cli_info, reset_config, restart_cmd, set_csi, set_csi_delivery_cmd, set_csi_filter,
     set_csi_output, set_io_tasks_cmd, set_log_mode, set_phy_rate, set_protocol_cmd,
-    set_reporting_cmd, set_session_cmd, set_traffic, set_wifi, show_config, start_csi_collect,
+    set_measurement, set_reporting_cmd, set_session_cmd, set_wifi, show_config, start_csi_collect,
     version_cmd,
 };
 pub use crate::cli::serial::SerialInterface;
@@ -43,7 +43,7 @@ pub const ROOT_MENU: Menu<SerialInterface, Context> = Menu {
     items: &[
         &Item {
             item_type: ItemType::Callback {
-                function: set_traffic,
+                function: set_measurement,
                 parameters: &[
                     Parameter::NamedValue {
                         parameter_name: "type",
@@ -51,9 +51,9 @@ pub const ROOT_MENU: Menu<SerialInterface, Context> = Menu {
                         help: Some("Traffic Type"),
                     },
                     Parameter::NamedValue {
-                        parameter_name: "frequency-hz",
-                        argument_name: "frequency-hz",
-                        help: Some("Traffic Generation Frequency"),
+                        parameter_name: "periodicity-hz",
+                        argument_name: "periodicity-hz",
+                        help: Some("Measurement periodicity in Hz (0 = no generated traffic)"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "unsolicited",
@@ -62,36 +62,42 @@ pub const ROOT_MENU: Menu<SerialInterface, Context> = Menu {
                     },
                 ],
             },
-            command: "set-traffic",
+            command: "set-measurement",
             help: Some(
-                "set-traffic - Configure traffic-related parameters.
+                "set-measurement - Configure the node's measurement setup.
 
 Usage:
-  set-traffic [OPTIONS]
+  set-measurement [OPTIONS]
 
 Options:
-  --frequency-hz=<NUMBER>      Specify the traffic frequency in Hz (default: 100).
+  --periodicity-hz=<NUMBER>    Measurement periodicity: the rate in Hz of the
+                               sounding traffic this node generates
+                               (default: 100). 0 disables traffic generation.
   --unsolicited=<on|off>       Flood unsolicited ICMP echo REPLIES instead of
                                echo requests (default: off). The peer ignores
                                unsolicited replies, so traffic is strictly
                                one-directional: no reply contention, stable
                                offered rate — but this node gets no CSI back.
                                Use on a flooding AP whose paired station is
-                               the collector; keep off when this node needs
-                               CSI from the peer's replies (e.g. station
+                               the reporting receiver; keep off when this node
+                               needs CSI from the peer's replies (e.g. station
                                flooding a router).
 
 Examples:
-  set-traffic --frequency-hz=10
-  set-traffic --frequency-hz=1000 --unsolicited=on
+  set-measurement --periodicity-hz=10
+  set-measurement --periodicity-hz=1000 --unsolicited=on
 
 Description:
-  This command allows you to configure traffic parameters for the CSI collection process.
-  You can enable traffic generation and specify the interval
-  between generated packets. Setting a value of zero disables traffic
-  generation (WiFi AP/station modes: the ICMP flood TX task is not started;
-  a receive-only collector should set this to 0 so it does not contend for
-  airtime with the AP's downlink flood).",
+  Sets the periodicity of the measurement setup the next run is built with
+  (esp_csi_rs::MeasurementSetup::periodicity_hz): the ESP-NOW initiator's
+  sounding rate and the responder's reply pacing, the simplex source's flood,
+  the station's gateway ping and the access point's downlink flood. The sniffer
+  and the simplex peer sound nothing and ignore it.
+
+  Setting zero disables traffic generation (WiFi AP/station modes: the ICMP
+  flood TX task is not started, and a station then has no session role). A
+  receive-only station should set this to 0 so it does not contend for airtime
+  with the AP's downlink flood.",
             ),
         },
         &Item {
@@ -126,10 +132,10 @@ Description:
   measure capture cost without delivery cost. An emitter captures nothing, so
   the setting has no effect there.
 
-  This is not the node's collection mode. For a node whose only job is to keep
-  traffic on air, configure it as a listener with
-  `set-wifi --collection=listener` (ESP-NOW, station, wifi-ap), which the
-  ESP-NOW modes also announce to their peer."),
+  This is not the node's reporting. For a node whose only job is to keep
+  traffic on air, configure it to report nothing with
+  `set-wifi --reporting=none` (ESP-NOW, station, wifi-ap), which the ESP-NOW
+  modes also announce to their peer."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -165,7 +171,7 @@ Examples:
   set-csi-filter --peer-mac=any --min-phy=any
 
 Description:
-  A collector is promiscuous: it reports CSI for every frame its radio decodes.
+  A reporting receiver is promiscuous: it reports CSI for every frame its radio decodes.
   On a busy channel that means your AP's beacons and ACKs, the association
   exchange, and any THIRD-PARTY device on the channel, mixed in with the traffic
   you configured. Those rows are valid CSI, but they look wrong — the leading
@@ -201,10 +207,10 @@ Options:
   --mode=text           Human-readable verbose output with metadata (default).
   --mode=array-list     Compact CSV-style array output, one line per packet.
   --mode=serialized     Binary COBS-framed postcard frames in the versioned
-                        esp_csi_rs::wire format (esp-csi-rs 0.12; protocol=3).
+                        esp_csi_rs::wire format (unchanged since esp-csi-rs 0.12).
                         Decode with esp_csi_rs::wire::decode_cobs.
   --mode=esp-csi-tool   Hernandez-style 26-column CSV (`CSI_DATA,...` lines) for
-                        compatibility with the ESP32-CSI-Tool collector.
+                        compatibility with the ESP32-CSI-Tool.
 
 Examples:
   set-log-mode --mode=text
@@ -452,9 +458,14 @@ configurations on or off."),
                     // — so the `argument_finder` call on its own reads as working code and
                     // silently never fires.
                     Parameter::NamedValue {
-                        parameter_name: "collection",
-                        argument_name: "collection",
-                        help: Some("collector|listener|threshold|decimate — whether this node's CSI leaves it"),
+                        parameter_name: "reporting",
+                        argument_name: "reporting",
+                        help: Some("report|none|threshold|decimate — whether this node's CSI leaves it"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "report-to",
+                        argument_name: "reportto",
+                        help: Some("host|local — where 'report' sends measurements (default host)"),
                     },
                     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
                     Parameter::NamedValue {
@@ -485,26 +496,26 @@ quotes, e.g. --sta-ssid='My WiFi' --sta-password=\"my pass\". Both quote styles
 are accepted. Underscores are passed through as literal `_`.
 
 Options:
-  --mode=<MODE>                                                 Specify the operational mode (default: sniffer). One of:
+  --mode=<MODE>                                                 Specify the mode (default: sniffer). One of:
                                                                 station, sniffer, wifi-ap, ht20-emitter,
-                                                                ht40-emitter, esp-now-central,
-                                                                esp-now-peripheral, esp-now-fast-collector,
-                                                                esp-now-fast-source. Aliases:
-                                                                esp-now-simplex-peer = esp-now-fast-collector,
-                                                                esp-now-simplex-source = esp-now-fast-source.
-  --collection=<collector|listener|threshold|decimate>          The node's reporting policy (default: collector).
-                                                                A listener captures CSI but reports none;
+                                                                ht40-emitter, esp-now-initiator,
+                                                                esp-now-responder, esp-now-simplex-source,
+                                                                esp-now-simplex-peer.
+  --reporting=<report|none|threshold|decimate>                  The node's reporting (default: report).
+                                                                none measures but reports nothing;
                                                                 threshold reports only while the channel moves,
                                                                 decimate every n-th frame (parameters: see
-                                                                set-reporting). Read by esp-now-central,
-                                                                esp-now-peripheral, station and wifi-ap; the
-                                                                sniffer takes all but listener; every other mode
-                                                                fixes it (the simplex peer collects, emitters and
-                                                                the simplex source listen).
+                                                                set-reporting). Read by esp-now-initiator,
+                                                                esp-now-responder, station and wifi-ap; the
+                                                                sniffer takes all but none; every other mode
+                                                                fixes it (the simplex peer reports, emitters and
+                                                                the simplex source report none).
+  --report-to=<host|local>                                      Where report sends measurements (default: host).
+                                                                local delivers only to on-device consumers.
   --he20=<on|off>                                               ESP32-C5/C6 only. Force HE20 (802.11ax SU, 20 MHz)
                                                                 on ht20-/ht40-emitter (replaces the HT PHY) and on
-                                                                esp-now-central/-peripheral (overrides --ht40).
-                                                                Pair collectors with set-csi --preset=he20.
+                                                                esp-now-initiator/-responder (overrides --ht40).
+                                                                Pair receivers with set-csi --preset=he20.
   --sta-ssid=<SSID>                                             Set the SSID for the station (default: empty).
   --sta-password=<PASSWORD>                                     Set the password for the station (default: empty).
   --ap-ssid=<SSID>                                              Set the SSID for wifi-ap mode (default: esp-csi-ap).
@@ -516,7 +527,7 @@ Options:
   --ap-burst=<on|off>                                           Synchronized burst flood in wifi-ap mode (default: off).
                                                                 Every tick sends one frame back-to-back to every station
                                                                 for time-aligned multi-receiver CSI; total airtime =
-                                                                frequency-hz x leases (off = round-robin, rate shared).
+                                                                periodicity-hz x leases (off = round-robin, rate shared).
   --set-channel=<NUMBER>                                        Set the channel (default: 149 on C5, 1 elsewhere).
                                                                 In station mode this also selects the C5's radio band, so
                                                                 associating to a 2.4 GHz AP needs an explicit 2.4 GHz
@@ -524,8 +535,8 @@ Options:
                                                                 and reports only 'no access point found'.
   --peer-mac=<aa:bb:cc:dd:ee:ff>                                One field, two meanings by mode.
                                                                 Emitter modes: destination of injected frames; empty =
-                                                                broadcast (default). Unicasting to a collector's MAC
-                                                                usually raises that collector's CSI rate.
+                                                                broadcast (default). Unicasting to a receiver's MAC
+                                                                usually raises that receiver's CSI rate.
                                                                 ESP-NOW modes (simplex included): explicit peer address;
                                                                 empty keeps automatic pairing, and setting it switches
                                                                 to source-MAC filtering, which requires BOTH nodes to be
@@ -548,47 +559,48 @@ Examples:
   set-wifi --mode=station --sta-ssid=MyAP --set-channel=6        # C5: pin the 2.4 GHz band
   set-wifi --mode=ht20-emitter --set-channel=6 --inject-period-ms=20
   set-wifi --mode=ht40-emitter --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
-  set-wifi --mode=esp-now-central --set-channel=6
-  set-wifi --mode=esp-now-peripheral --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
+  set-wifi --mode=esp-now-initiator --set-channel=6
+  set-wifi --mode=esp-now-responder --set-channel=6 --peer-mac=aa:bb:cc:dd:ee:ff
   set-wifi --mode=esp-now-simplex-peer --set-channel=6
-  set-wifi --mode=station --sta-ssid=MyAP --collection=listener
+  set-wifi --mode=station --sta-ssid=MyAP --reporting=none
   set-wifi --mode=ht20-emitter --he20=on                         # C5/C6
 
 Description:
   Use this command to configure WiFi settings for the CSI collection process.
-  `--mode` picks the operational mode (the link the node uses to reach the
-  channel) and, where the link has two ends, the network role. `--collection`
-  picks whether the node's CSI leaves it. The node model these follow is at
+  `--mode` picks the mode (the link the node uses to reach the channel) and,
+  where the link has two ends, the session role (initiator or responder).
+  `--reporting` picks whether the node's CSI leaves it. The terms follow IEEE
+  802.11bf; the node model is at
   https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md
   - Emitter (`ht20-emitter` / `ht40-emitter`): raw 802.11n HT sounding, 20 or
-    40 MHz, unassociated and TX only. A central listener that captures nothing.
+    40 MHz, unassociated and TX only. A transmitter that reports nothing.
     Uses `--set-channel`, `--peer-mac`, `--inject-period-us`. All chips; pair
     with a `sniffer`.
   - Wi-Fi sniffer (`sniffer`): lock a channel promiscuously and measure every
-    frame overheard. Always a collector; the mode that pairs with an emitter.
+    frame overheard. An observer and a receiver that always reports; the mode
+    that pairs with an emitter.
   - Wi-Fi station (`station`): associate to an existing AP or router and
-    measure the link.
+    measure the link. The initiator while it pings (periodicity > 0).
   - Wi-Fi access point (`wifi-ap`): self-contained softAP with DHCP (pair with
-    `station` on the same SSID). Always a central.
+    `station` on the same SSID). Always the initiator.
   - ESP-NOW (connectionless, no association or DHCP; both sides need the same
     `--set-channel`):
-      - `esp-now-central` + `esp-now-peripheral`: symmetric exchange. The
-        central sources the traffic, the peripheral replies, and either end may
-        be a collector or a listener. `set-rate` applies here as the per-peer
-        TX PHY.
+      - `esp-now-initiator` + `esp-now-responder`: symmetric exchange. The
+        initiator sources the traffic, the responder replies, and either end
+        may report or not. `set-rate` applies here as the per-peer TX PHY.
   - ESP-NOW simplex, for maximum packets/sec:
-      - `esp-now-fast-source` (alias `esp-now-simplex-source`): the source end,
-        a central listener. Learns the peer's MAC and unicasts a continuous
-        flood at a forced PHY.
-      - `esp-now-fast-collector` (alias `esp-now-simplex-peer`): the peer end, a
-        peripheral collector. Broadcasts a sparse discovery beacon until it
-        hears a source, then stops beaconing and goes RX-only, capturing CSI
-        from the flood. All the airtime belongs to one transmitter, so this
-        yields the highest CSI rate of any pair.
+      - `esp-now-simplex-source`: the initiator, a transmitter that reports
+        nothing. Learns the peer's MAC and unicasts a continuous flood at a
+        forced PHY.
+      - `esp-now-simplex-peer`: the responder, a receiver that reports.
+        Broadcasts a sparse discovery beacon until it hears a source, then
+        stops beaconing and goes RX-only, capturing CSI from the flood. All
+        the airtime belongs to one transmitter, so this yields the highest CSI
+        rate of any pair.
   - Pairing is automatic by default (magic-prefix). Use `--peer-mac` on BOTH nodes
     to pin an explicit pair instead, which is what you want with more than two
     boards on one channel.
-  - For AP + STA lab pairs, use `set-protocol --protocol=n` and consider `set-traffic --frequency-hz=4000`."),
+  - For AP + STA lab pairs, use `set-protocol --protocol=n` and consider `set-measurement --periodicity-hz=4000`."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -618,11 +630,11 @@ Examples:
 Description:
   This command initiates the CSI collection process for a specified duration.
   Before starting, ensure the device is properly configured using the `set-wifi`,
-  `set-traffic`, `set-csi` and `set-csi-output` commands (`show-config` prints
+  `set-measurement`, `set-csi` and `set-csi-output` commands (`show-config` prints
   what the run will use).
 
   During the collection process:
-  - Traffic generation will occur based on the configured parameters (if enabled).
+  - Traffic generation will occur at the configured periodicity (if non-zero).
   - CSI data will be collected and printed to the console.
   - After the specified duration, the process will terminate automatically. Otherwise collection runs forever.
   - Press 'q' (or 'Q') at any time to stop collection early."),
@@ -640,11 +652,19 @@ Usage:
 
 Description:
   Prints a summary of every persisted setting:
-  - WiFi: mode, channel, station SSID/password, softAP SSID/password/DHCP,
+  - Node: the IEEE 802.11bf attributes of the next run, read back from the
+    mode it will be built with:
+      Mode: <token>
+      Session role: initiator|responder|none (observer)
+      Sensing role: transmitter|receiver|transmitter-receiver
+      Reporting: report (host)|report (local)|none|threshold (...)|decimate N
+      Periodicity: N Hz
+    Values a mode does not let you choose are marked '(fixed by mode)'.
+  - WiFi: channel, station SSID/password, softAP SSID/password/DHCP,
     peer MAC, HT40 secondary.
-  - Collection: collection mode (marked 'fixed by mode' where the mode does
-    not read --collection), CSI output gate, CSI filters, traffic frequency,
-    PHY rate, protocol, TX/RX task toggles, emitter inter-frame period.
+  - Measurement: report destination, threshold/decimate parameters, session
+    id, CSI output gate, CSI filters, PHY rate, protocol, TX/RX task toggles,
+    emitter inter-frame period.
   - CSI Config: chip-specific feature flags (LLTF/HTLTF on classic chips,
     per-PPDU-format acquisition flags on ESP32-C5/C6).
 
@@ -686,8 +706,10 @@ Output format:
   The same magic line `ESP-CSI-CLI/<version>` is also printed at the top
   of the welcome banner on every reset, so a host can identify the
   firmware passively without sending this command. The `protocol` field
-  bumps on any breaking change to this grammar or to the serialized CSI
-  format (3 = esp-csi-rs 0.12 `wire` frames)."),
+  bumps on any breaking change to this grammar, to the command grammar or to
+  the serialized CSI format (3 = esp-csi-rs 0.12 `wire` frames; 4 = IEEE
+  802.11bf command vocabulary: --reporting, set-measurement, initiator/responder
+  mode tokens)."),
         },
         &Item {
             item_type: ItemType::Callback {
@@ -749,8 +771,8 @@ Description:
   Re-initializes the runtime UserConfig with built-in defaults:
   - WiFi mode: Sniffer, channel 149 on the ESP32-C5 (1 elsewhere), no station
     SSID/password, no peer MAC.
-  - Collection: collector, CSI output enabled, no CSI filters, traffic
-    frequency 100 Hz.
+  - Reporting: report (host), CSI output enabled, no CSI filters;
+    periodicity 100 Hz.
   - PHY rate: MCS0-LGI; IO tasks: TX + RX both enabled.
   - CSI feature flags: chip default (all enabled / max-detail).
 
@@ -782,8 +804,8 @@ Examples:
   set-rate --rate=24m
 
 Description:
-  Reporting only, except on the ESP-NOW pair: esp-now-central and
-  esp-now-peripheral apply it as the per-peer TX PHY. Every other mode only
+  Reporting only, except on the ESP-NOW pair: esp-now-initiator and
+  esp-now-responder apply it as the per-peer TX PHY. Every other mode only
   stores it and echoes it in show-config — station, sniffer and wifi-ap take
   their rate from the surrounding radio configuration, an emitter transmits at
   the rate its forced TX PHY implies, and the ESP-NOW simplex source uses the
@@ -816,7 +838,7 @@ Examples:
   set-protocol --protocol=n      # 802.11n, e.g. station mode against an AP
 
 Description:
-  Applied to the node via CSINode::set_protocol at the start of each
+  Applied to the node via CsiNode::set_protocol at the start of each
   collection run.
 
   Pick the protocol to match your link: LR for maximum range between ESP
@@ -935,7 +957,12 @@ Description:
                     Parameter::NamedValue {
                         parameter_name: "policy",
                         argument_name: "policy",
-                        help: Some("always|never|threshold|decimate"),
+                        help: Some("report|none|threshold|decimate"),
+                    },
+                    Parameter::NamedValue {
+                        parameter_name: "report-to",
+                        argument_name: "reportto",
+                        help: Some("host|local — where 'report' sends measurements"),
                     },
                     Parameter::NamedValue {
                         parameter_name: "level",
@@ -955,15 +982,16 @@ Description:
                 ],
             },
             command: "set-reporting",
-            help: Some("set-reporting - Set the reporting policy and its parameters.
+            help: Some("set-reporting - Set the node's reporting and its parameters.
 
 Usage:
-  set-reporting [--policy=<always|never|threshold|decimate>] [--level=<N>]
-                [--hold-ms=<MS>] [--n=<N>]
+  set-reporting [--policy=<report|none|threshold|decimate>] [--report-to=<host|local>]
+                [--level=<N>] [--hold-ms=<MS>] [--n=<N>]
 
 Options:
-  --policy=always     Report every measurement (= --collection=collector).
-  --policy=never      Report nothing (= --collection=listener).
+  --policy=report     Report every measurement (= set-wifi --reporting=report).
+  --policy=none       Measure but report nothing (= set-wifi --reporting=none).
+                      Refused on a sniffer.
   --policy=threshold  Report only while the channel moves: a measurement whose
                       score reaches --level opens a --hold-ms window in which
                       every measurement is reported.
@@ -971,16 +999,20 @@ Options:
   --level=<0-65535>   Threshold score (default: 6000, uncalibrated).
   --hold-ms=<MS>      Threshold hold window (default: 1000).
   --n=<N>             Decimation factor (default: 2).
+  --report-to=host    report sends to the host output (default).
+  --report-to=local   report delivers only to on-device consumers.
 
 Examples:
   set-reporting --policy=threshold --level=5000 --hold-ms=500
   set-reporting --policy=decimate --n=10
-  set-reporting --policy=always
+  set-reporting --policy=report
+  set-reporting --policy=report --report-to=local
 
 Description:
-  The same setting as `set-wifi --collection=`, plus the parameters. Read by
-  esp-now-central, esp-now-peripheral, station and wifi-ap; the sniffer takes
-  threshold and decimate but not never; the other modes fix it.
+  The same setting as `set-wifi --reporting=`, plus the parameters. Read by
+  esp-now-initiator, esp-now-responder, station and wifi-ap; the sniffer takes
+  report, threshold and decimate but not none; the other modes fix it.
+  threshold is IEEE 802.11bf threshold-based reporting.
 
   Calibrate --level on your own link: a still room does not score zero (two
   ESP32-C5s at HE20 measured a ~2700 median and ~4300 99th percentile).

@@ -4,7 +4,7 @@ use core::sync::atomic::AtomicBool;
 use embassy_sync::{
     blocking_mutex::Mutex, blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal,
 };
-use esp_csi_rs::{IOTaskConfig, ReportingPolicy, Threshold, config::CsiConfig};
+use esp_csi_rs::{IOTaskConfig, ReportTo, Reporting, Threshold, config::CsiConfig};
 use esp_radio::esp_now::WifiPhyRate;
 use esp_radio::wifi::{Protocol, SecondaryChannel};
 use heapless::String;
@@ -53,36 +53,42 @@ pub static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 /// [`csi_collection`] task at the start of each collection run.
 #[derive(Clone)]
 pub struct UserConfig {
-    /// Operational mode (sniffer, station, softAP, emitter, ESP-NOW, ESP-NOW simplex), with the
-    /// network role where the mode has two ends.
+    /// Mode (sniffer, station, softAP, emitter, ESP-NOW, ESP-NOW simplex), with the session role
+    /// (initiator or responder) where the mode has two ends.
     pub node_mode: NodeMode,
     /// Whether captured CSI is delivered off-device. When `false` the radio still
     /// captures — RX path and timing unchanged — but nothing is decoded or logged
     /// (`esp_csi_rs::set_csi_output_enabled`). Set via `set-csi-output --enabled=`.
     pub csi_output_enabled: bool,
-    /// The node's **reporting policy** — whether, and how often, its measurements leave it.
-    /// `Always` is the old *collector*, `Never` the old *listener* (captures, reports nothing);
-    /// `Threshold` reports only while the channel moves and `Decimate(n)` every n-th measurement.
+    /// The node's **reporting** — whether, and how often, its measurements leave it.
+    /// `Report { to }` reports every measurement, `None` measures but reports nothing,
+    /// `ThresholdBased` reports only while the channel moves (IEEE 802.11bf threshold-based
+    /// reporting) and `Decimate(n)` every n-th measurement.
     ///
     /// Distinct from `csi_output_enabled`, which is the *runtime* delivery gate. This one is part
     /// of the node's configuration and, on the ESP-NOW modes, is announced on the wire
-    /// (`ControlPacket::is_collector`) so a peripheral paired with a listening central promotes
-    /// itself. Set via `set-wifi --collection=` or `set-reporting --policy=`.
+    /// (`ControlPacket::initiator_reports`) so a responder paired with an initiator that reports
+    /// nothing promotes itself. Set via `set-wifi --reporting=` or `set-reporting --policy=`.
     ///
-    /// Read by ESP-NOW central/peripheral, station and wifi-ap. A sniffer takes only `Threshold`
-    /// and `Decimate` (it cannot be a listener); the other modes fix the attribute and ignore it.
-    pub reporting: ReportingPolicy,
+    /// Read by ESP-NOW initiator/responder, station and wifi-ap. A sniffer takes everything but
+    /// `None` (a sniffer that reports nothing observes nothing); the other modes fix the attribute
+    /// and ignore it.
+    pub reporting: Reporting,
+    /// Where `report` sends measurements: the host output (default) or only on-device consumers.
+    /// Set via `--report-to=host|local` on `set-wifi` or `set-reporting`; kept separately so that
+    /// switching to `threshold` and back to `report` keeps the destination.
+    pub report_to: ReportTo,
     /// Parameters applied when the policy is set to `threshold` (`set-reporting --level= --hold-ms=`).
     pub threshold: Threshold,
     /// `n` applied when the policy is set to `decimate` (`set-reporting --n=`).
     pub decimate_n: u16,
-    /// Force HE20 (802.11ax SU, 20 MHz) on the emitter modes and the ESP-NOW central/peripheral
+    /// Force HE20 (802.11ax SU, 20 MHz) on the emitter modes and the ESP-NOW initiator/responder
     /// pair. Only the ESP32-C5 and C6 have an 802.11ax PHY. Set via `set-wifi --he20=on|off`.
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     pub he20: bool,
     /// Restrict delivered CSI to this source MAC. `None` = accept every source.
     ///
-    /// A collector is promiscuous: it reports CSI for the AP's beacons and ACKs and for any
+    /// A reporting receiver is promiscuous: it reports CSI for the AP's beacons and ACKs and for any
     /// third-party device on the channel, not only for the traffic you configured. Set via
     /// `set-csi-filter --peer-mac=`.
     pub csi_peer_filter: Option<[u8; 6]>,
@@ -91,8 +97,10 @@ pub struct UserConfig {
     /// `1` drops the legacy-rate mgmt/control frames that produce the short L-LTF-only rows at the
     /// head of a collection. Set via `set-csi-filter --min-phy=`.
     pub csi_min_sig_mode: u8,
-    /// Traffic generation frequency in Hz. `0` disables traffic generation.
-    pub trigger_freq: u64,
+    /// Measurement periodicity in Hz: the rate of the sounding traffic the node generates
+    /// (`MeasurementSetup::periodicity_hz`). `0` disables traffic generation.
+    /// Set via `set-measurement --periodicity-hz=`.
+    pub periodicity_hz: u16,
     /// ICMP flood sends unsolicited echo *replies* instead of echo requests.
     /// The peer's IP stack silently ignores unsolicited replies, so traffic is
     /// strictly one-directional: the peer still ACKs at the MAC level and
@@ -120,8 +128,8 @@ pub struct UserConfig {
     /// associated stations capture their downlink CSI within tens of
     /// microseconds of each other (time-aligned multi-receiver capture).
     /// When `false`, the flood round-robins one station per tick. Each
-    /// receiver then sees the full `trigger_freq`, so total offered airtime is
-    /// `trigger_freq × leases` — lower the rate if the channel saturates.
+    /// receiver then sees the full `periodicity_hz`, so total offered airtime is
+    /// `periodicity_hz × leases` — lower the rate if the channel saturates.
     pub ap_sync_burst: bool,
     /// Low-level CSI hardware configuration (feature flags, scale, etc.).
     pub csi_config: CsiConfig,
@@ -130,13 +138,13 @@ pub struct UserConfig {
     /// (`WifiStationConfig::channel_hint`) before association.
     pub channel: u8,
     /// Wi-Fi PHY rate. Reporting only, except on the ESP-NOW pair: applied to the
-    /// per-peer TX PHY of the ESP-NOW central / peripheral (`EspNowConfig::with_phy_rate`).
+    /// per-peer TX PHY of the ESP-NOW initiator / responder (`EspNowConfig::with_phy_rate`).
     /// Ignored elsewhere: station, sniffer and softAP take their rate from the AP / radio
     /// configuration, an emitter transmits at the rate its forced TX PHY implies, and the
     /// simplex source takes its rate from `EspNowConfig::fast_default()`.
     pub phy_rate: WifiPhyRate,
     /// Wi-Fi PHY protocol applied to the node before a collection run
-    /// (`CSINode::set_protocol`). Set via `set-protocol --protocol=<...>`.
+    /// (`CsiNode::set_protocol`). Set via `set-protocol --protocol=<...>`.
     /// `LR` (Espressif long-range) is the default and suits sniffer links
     /// between ESP devices; use `N` when associating to a standard AP in
     /// station mode.
@@ -149,7 +157,7 @@ pub struct UserConfig {
     /// referents, because the underlying engine configs each have exactly one:
     ///
     /// - Emitter modes: destination of injected frames (`EmitterConfig::with_dst_mac`).
-    ///   `None` = broadcast. Unicasting to a collector usually raises its CSI rate.
+    ///   `None` = broadcast. Unicasting to a receiver usually raises its CSI rate.
     /// - ESP-NOW modes: explicit peer (`EspNowConfig::with_peer_mac`). `None` keeps
     ///   automatic magic-prefix pairing; `Some` drops the magic prefix and filters on
     ///   source MAC instead, so BOTH nodes must be configured with the other's address.
@@ -196,11 +204,12 @@ impl core::fmt::Debug for UserConfig {
             .field("node_mode", &self.node_mode)
             .field("csi_output_enabled", &self.csi_output_enabled)
             .field("reporting", &self.reporting)
+            .field("report_to", &self.report_to)
             .field("threshold", &self.threshold)
             .field("decimate_n", &self.decimate_n)
             .field("csi_peer_filter", &self.csi_peer_filter)
             .field("csi_min_sig_mode", &self.csi_min_sig_mode)
-            .field("trigger_freq", &self.trigger_freq)
+            .field("periodicity_hz", &self.periodicity_hz)
             .field("flood_unsolicited", &self.flood_unsolicited)
             .field("sta_ssid", &self.sta_ssid)
             .field("sta_password", &self.sta_password)
@@ -232,10 +241,11 @@ impl UserConfig {
     /// |-------------------|------------------------|
     /// | `node_mode`       | `WifiSniffer`          |
     /// | `csi_output_enabled` | `true`              |
-    /// | `reporting`       | `Always` (collector)   |
+    /// | `reporting`       | `Report { to: Host }`  |
+    /// | `report_to`       | `Host`                 |
     /// | `csi_peer_filter` | `None` (any source)    |
     /// | `csi_min_sig_mode` | `0` (any PHY)         |
-    /// | `trigger_freq`    | `100` Hz               |
+    /// | `periodicity_hz`  | `100` Hz               |
     /// | `flood_unsolicited` | `false` (echo requests) |
     /// | `sta_ssid`        | *(empty)*              |
     /// | `sta_password`    | *(empty)*              |
@@ -253,7 +263,8 @@ impl UserConfig {
         UserConfig {
             node_mode: NodeMode::WifiSniffer,
             csi_output_enabled: true,
-            reporting: ReportingPolicy::Always,
+            reporting: Reporting::HOST,
+            report_to: ReportTo::Host,
             // Uncalibrated starting point: a still room scores ~2700 median / ~4300 p99 on two
             // C5s at HE20 (esp-csi-rs `Threshold` docs). Calibrate `level` on your own link.
             threshold: Threshold::new(6000, 1000),
@@ -262,7 +273,7 @@ impl UserConfig {
             he20: false,
             csi_peer_filter: None,
             csi_min_sig_mode: 0,
-            trigger_freq: 100,
+            periodicity_hz: 100,
             flood_unsolicited: false,
             sta_ssid: String::new(),
             sta_password: String::new(),

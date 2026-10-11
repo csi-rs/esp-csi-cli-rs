@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-cli-rs"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 # This crate is firmware, not a library or a host application: the build product
 # is an image flashed to an ESP32, so there is nothing for a crates.io consumer
@@ -119,13 +119,17 @@ embassy-time = { version = "0.5.1" }
 static_cell = { version = "2.1.1" }
 embassy-sync = { version = "0.8.0" }
 embassy-futures = { version = "0.1.2" }
-esp-csi-rs = { version = "0.12", default-features = false }
+esp-csi-rs = { version = "0.13", default-features = false }
 # `default-features = false` disables menu's per-keystroke echo. The CLI does
 # its own echo in the byte-stream preprocessor (main.rs) so that quote chars
 # and in-quote spaces render correctly — menu's echo would otherwise repaint
 # the buffer with the 0x1F sentinel (invisible) where the user typed a space.
 menu = { version = "0.6.1", default-features = false }
 embedded-io = "0.6.1"
+
+[patch.crates-io]
+# TEMP until esp-csi-rs 0.13.0 is published
+esp-csi-rs = { path = "../esp-csi-rs" }
 
 [profile.dev]
 # Rust debug is too slow.

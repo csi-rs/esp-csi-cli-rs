@@ -62,10 +62,10 @@ use esp_backtrace as _;
 use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::logging::logging::{LogMode, init_logger};
 use esp_csi_rs::{
-    CSINode, CSINodeClient, CsiDeliveryMode, EmitterConfig, EmitterPhy, EspNowConfig,
-    NetworkRole, NodeHardware, OperationalMode, ReportingPolicy, SimplexConfig, WifiApConfig,
-    WifiSnifferConfig, WifiStationConfig, clear_csi_callback, set_csi_delivery_mode,
-    set_csi_logging_enabled, set_csi_raw_callback,
+    CsiDeliveryMode, CsiNode, CsiNodeClient, EmitterConfig, EmitterPhy, EspNowConfig,
+    MeasurementSetup, Mode, NodeHardware, ReportTo, Reporting, SessionRole, SimplexConfig,
+    WifiApConfig, WifiSnifferConfig, WifiStationConfig, clear_csi_callback,
+    set_csi_delivery_mode, set_csi_logging_enabled, set_csi_raw_callback,
 };
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -223,7 +223,7 @@ fn ssid_and_auth(ssid: &str, password: &str) -> (esp_radio::wifi::Ssid, Authenti
 
 /// As [`build_espnow_config`], but from `EspNowConfig::fast_default()` — the asymmetric simplex
 /// pair, whose PHY rate is fixed by the fast profile rather than taken from `set-rate`.
-fn build_espnow_fast_config(user_config: &UserConfig) -> EspNowConfig {
+fn build_espnow_simplex_config(user_config: &UserConfig) -> EspNowConfig {
     let mut cfg = EspNowConfig::fast_default().with_channel(user_config.channel);
     if let Some(mac) = user_config.peer_mac {
         cfg = cfg.with_peer_mac(mac);
@@ -269,37 +269,184 @@ fn recompute_quote_state(shadow: &[u8]) -> Option<u8> {
     state
 }
 
-/// Operational mode selected by the user via `set-wifi --mode`, plus the network role where the
-/// mode has more than one end.
+/// Mode selected by the user via `set-wifi --mode`, plus the session role where the mode has two
+/// ends.
 ///
-/// This determines which [`esp_csi_rs::OperationalMode`] the underlying
-/// [`esp_csi_rs::CSINode`] is built with and which `esp-radio` interfaces are
-/// activated during a collection run. The collection mode is a separate field
-/// (`set-wifi --collection`); see
+/// This determines which [`esp_csi_rs::Mode`] the underlying [`esp_csi_rs::CsiNode`] is built with
+/// and which `esp-radio` interfaces are activated during a run. Reporting is a separate field
+/// (`set-wifi --reporting`); see
 /// <https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md>.
-#[derive(Debug, Clone)]
-enum NodeMode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeMode {
     /// Wi-Fi sniffer: promiscuous capture of whatever is on the configured channel.
-    /// Always a peripheral collector.
+    /// No session role (an observer), a receiver, and always reports.
     WifiSniffer,
-    /// Wi-Fi station: associates to an existing AP or router.
+    /// Wi-Fi station: associates to an existing AP or router. The initiator while it drives the
+    /// gateway ping (periodicity > 0), otherwise an observer.
     WifiStation,
-    /// Wi-Fi access point: self-contained softAP (DHCP + ICMP flood). Always a central.
+    /// Wi-Fi access point: self-contained softAP (DHCP + ICMP flood). Always the initiator.
     WifiAccessPoint,
     /// Emitter, forced HT20: unassociated loop-injection of 20 MHz 802.11n
-    /// PPDUs. A central listener: TX only, never captures CSI.
+    /// PPDUs. A transmitter that reports nothing: TX only, never captures CSI.
     Ht20Emitter,
     /// Emitter, forced HT40: 40 MHz bonded 802.11n PPDUs (secondary above the
-    /// primary). A central listener: TX only.
+    /// primary). A transmitter that reports nothing.
     Ht40Emitter,
-    /// ESP-NOW, central end: sources the traffic of the pair.
-    EspNowCentral,
-    /// ESP-NOW, peripheral end: replies to the central's traffic.
-    EspNowPeripheral,
-    /// ESP-NOW simplex, peer end: a peripheral collector (sparse beacon, then RX-only).
-    EspNowFastCollector,
-    /// ESP-NOW simplex, source end: a central listener (unicast flood at forced PHY).
-    EspNowFastSource,
+    /// ESP-NOW, initiator end: sources the traffic of the pair.
+    EspNowInitiator,
+    /// ESP-NOW, responder end: replies to the initiator's traffic.
+    EspNowResponder,
+    /// ESP-NOW simplex, peer end: the responder, a receiver that reports (sparse beacon, then
+    /// RX-only).
+    EspNowSimplexPeer,
+    /// ESP-NOW simplex, source end: the initiator, a transmitter that reports nothing (unicast
+    /// flood at forced PHY).
+    EspNowSimplexSource,
+}
+
+impl NodeMode {
+    /// The `set-wifi --mode=` token for this mode. Also what `set-wifi` and `show-config` print.
+    pub(crate) const fn token(self) -> &'static str {
+        match self {
+            NodeMode::WifiSniffer => "sniffer",
+            NodeMode::WifiStation => "station",
+            NodeMode::WifiAccessPoint => "wifi-ap",
+            NodeMode::Ht20Emitter => "ht20-emitter",
+            NodeMode::Ht40Emitter => "ht40-emitter",
+            NodeMode::EspNowInitiator => "esp-now-initiator",
+            NodeMode::EspNowResponder => "esp-now-responder",
+            NodeMode::EspNowSimplexPeer => "esp-now-simplex-peer",
+            NodeMode::EspNowSimplexSource => "esp-now-simplex-source",
+        }
+    }
+
+    /// Parse a `set-wifi --mode=` token. No aliases: the pre-0.10 spellings
+    /// (`esp-now-central`, `esp-now-peripheral`, `esp-now-fast-*`) are rejected.
+    pub(crate) fn from_token(token: &str) -> Option<Self> {
+        Some(match token {
+            "sniffer" => NodeMode::WifiSniffer,
+            "station" => NodeMode::WifiStation,
+            "wifi-ap" => NodeMode::WifiAccessPoint,
+            "ht20-emitter" => NodeMode::Ht20Emitter,
+            "ht40-emitter" => NodeMode::Ht40Emitter,
+            "esp-now-initiator" => NodeMode::EspNowInitiator,
+            "esp-now-responder" => NodeMode::EspNowResponder,
+            "esp-now-simplex-peer" => NodeMode::EspNowSimplexPeer,
+            "esp-now-simplex-source" => NodeMode::EspNowSimplexSource,
+            _ => return None,
+        })
+    }
+
+    /// Whether this mode reads the configured reporting. Every other mode fixes it.
+    /// The sniffer reads it but cannot take `none`.
+    pub(crate) const fn reads_reporting(self) -> bool {
+        matches!(
+            self,
+            NodeMode::WifiSniffer
+                | NodeMode::WifiStation
+                | NodeMode::WifiAccessPoint
+                | NodeMode::EspNowInitiator
+                | NodeMode::EspNowResponder
+        )
+    }
+}
+
+/// The esp-csi-rs [`Mode`] the next run is built with, from a user-config snapshot.
+///
+/// Shared by the collection task and `show-config`, so the roles and reporting `show-config`
+/// prints are read back from the same `Mode` the run uses rather than restated by hand.
+///
+/// The configured channel and the per-mode builders flow through here so a user who sets
+/// `set-wifi --set-channel=6` then `start`s gets channel 6 applied even though set_channel is not
+/// called on the running node. The session role is chosen here only for ESP-NOW (the `--mode`
+/// token picks the end) and the station (initiator while it pings), and the reporting only for the
+/// modes that admit a choice. Every other mode fixes both, so there is nothing to set.
+pub(crate) fn build_mode(user_config: &UserConfig) -> Mode {
+    let reporting = user_config.reporting;
+    match user_config.node_mode {
+        NodeMode::WifiSniffer => {
+            // A sniffer cannot be told `None` (a sniffer that reports nothing observes nothing);
+            // `set-wifi`/`set-reporting` refuse it, and a stale `None` left from another mode
+            // falls back to reporting to the host.
+            let sniffer = WifiSnifferConfig::default().with_channel(user_config.channel);
+            Mode::Sniffer(match reporting {
+                Reporting::ThresholdBased(t) => sniffer.with_threshold(t),
+                Reporting::Decimate(n) => sniffer.with_decimation(n),
+                Reporting::Report { to } => sniffer.with_report_to(to),
+                _ => sniffer.with_report_to(ReportTo::Host),
+            })
+        }
+        NodeMode::WifiStation => {
+            let (ssid, auth) = ssid_and_auth(&user_config.sta_ssid, &user_config.sta_password);
+            let client_config = StationConfig::default()
+                .with_ssid(ssid)
+                .with_authentication(auth);
+            // The station drives the measured traffic (its gateway ping) only while a periodicity
+            // is set; with `--periodicity-hz=0` it passively measures and has no session role.
+            let session = if user_config.periodicity_hz > 0 {
+                Some(SessionRole::Initiator)
+            } else {
+                None
+            };
+            // The hint pins the C5's radio band, so it has to be the target AP's
+            // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
+            // default therefore makes a 2.4 GHz AP invisible unless overridden.
+            Mode::Station(
+                WifiStationConfig::new(client_config)
+                    .with_channel_hint(user_config.channel)
+                    .session(session)
+                    .reporting(reporting),
+            )
+        }
+        NodeMode::WifiAccessPoint => {
+            Mode::AccessPoint(build_wifi_ap_config(user_config).reporting(reporting))
+        }
+        NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
+            let phy = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
+                EmitterPhy::Ht40Above
+            } else {
+                EmitterPhy::Ht20
+            };
+            // `--he20=on` replaces either HT PHY with HE20 (802.11ax SU, 20 MHz).
+            #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+            let phy = if user_config.he20 { EmitterPhy::He20 } else { phy };
+            // `--peer-mac` is the injection destination here (default broadcast); in the
+            // ESP-NOW modes below the same field is the explicit pairing address instead.
+            let mut emitter = EmitterConfig::new(user_config.channel, phy)
+                .with_period(Duration::from_micros(user_config.inject_period_us as u64));
+            if let Some(mac) = user_config.peer_mac {
+                emitter = emitter.with_dst_mac(mac);
+            }
+            if !user_config.emitter_use_sta_if {
+                emitter = emitter.with_ap_interface();
+            }
+            Mode::Emitter(emitter)
+        }
+        // ESP-NOW is one mode with two ends; the session role selects which.
+        NodeMode::EspNowInitiator => Mode::EspNow(
+            build_espnow_config(user_config)
+                .session(SessionRole::Initiator)
+                .reporting(reporting),
+        ),
+        NodeMode::EspNowResponder => Mode::EspNow(
+            build_espnow_config(user_config)
+                .session(SessionRole::Responder)
+                .reporting(reporting),
+        ),
+        // The simplex source floods and so initiates; the peer beacons, then only receives.
+        NodeMode::EspNowSimplexPeer => {
+            // `--peer-mac` pairs this end with a known source instead of discovering one, the
+            // same as on the source end (`build_espnow_simplex_config`). Both ends need the other's.
+            let mut peer = SimplexConfig::peer(user_config.channel);
+            if let Some(mac) = user_config.peer_mac {
+                peer = peer.with_peer_mac(mac);
+            }
+            Mode::EspNowSimplex(peer)
+        }
+        NodeMode::EspNowSimplexSource => Mode::EspNowSimplex(SimplexConfig::source(
+            build_espnow_simplex_config(user_config),
+        )),
+    }
 }
 
 /// esp-backtrace `custom-halt` hook: called after the panic message and
@@ -690,9 +837,9 @@ async fn main(spawner: Spawner) -> ! {
 /// # Lifecycle
 /// 1. Waits on [`START_SIGNAL`] for a `Option<u64>` duration sent by the CLI `start` command.
 /// 2. Snapshots [`USER_CONFIG`] to get the current node settings.
-/// 3. Constructs and runs a [`CSINode`] according to those settings.
-///    - `Some(secs)` → [`CSINode::run_duration`] (prints internally).
-///    - `None` → [`CSINode::run`] joined with a continuous print loop.
+/// 3. Constructs and runs a [`CsiNode`] according to those settings.
+///    - `Some(secs)` → [`CsiNode::run_duration`] (prints internally).
+///    - `None` → [`CsiNode::run`] joined with a continuous print loop.
 /// 4. Signals [`DONE_SIGNAL`] to unlock the CLI in the main loop.
 ///
 /// This task runs for the lifetime of the application and restarts the cycle
@@ -714,120 +861,30 @@ async fn csi_collection(controller: &'static mut WifiController<'static>) {
         // Snapshot the current user configuration
         let user_config = USER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
 
-        // The reporting policy the user asked for. Only the modes that admit a choice take it;
-        // where a mode fixes the attribute there is no setter to hand it to.
-        let reporting = user_config.reporting;
-
-        // Map NodeMode → an operational mode. The configured channel and the per-mode builders
-        // flow through here so a user who sets `set-wifi --set-channel=6` then `start`s gets
-        // channel 6 applied even though set_channel is not called on the running node.
-        //
-        // The network role and collection mode are carried by each mode's config. The network
-        // role is chosen here only for ESP-NOW (the `--mode` string picks the end), and the
-        // collection mode only for the modes that admit a choice (ESP-NOW, station, access point).
-        // Every other mode fixes both, so there is nothing to set.
-        let mode = match user_config.node_mode {
-            NodeMode::WifiSniffer => {
-                // A sniffer cannot be told `Never` (a sniffer that reports nothing observes
-                // nothing), so only the rate-limiting policies reach it; `listener` is ignored.
-                let mut sniffer = WifiSnifferConfig::default().with_channel(user_config.channel);
-                match reporting {
-                    ReportingPolicy::Threshold(t) => sniffer = sniffer.with_threshold(t),
-                    ReportingPolicy::Decimate(n) => sniffer = sniffer.with_decimation(n),
-                    _ => {}
-                }
-                OperationalMode::Sniffer(sniffer)
-            }
-            NodeMode::WifiStation => {
-                let (ssid, auth) =
-                    ssid_and_auth(&user_config.sta_ssid, &user_config.sta_password);
-                let client_config = StationConfig::default()
-                    .with_ssid(ssid)
-                    .with_authentication(auth);
-                // The hint pins the C5's radio band, so it has to be the target AP's
-                // channel. `--set-channel` doubles as that hint; on the C5 its 5 GHz
-                // default therefore makes a 2.4 GHz AP invisible unless overridden.
-                OperationalMode::Station(
-                    WifiStationConfig::new(client_config)
-                        .with_channel_hint(user_config.channel)
-                        .with_reporting(reporting),
-                )
-            }
-            NodeMode::WifiAccessPoint => OperationalMode::AccessPoint(
-                build_wifi_ap_config(&user_config).with_reporting(reporting),
-            ),
-            NodeMode::Ht20Emitter | NodeMode::Ht40Emitter => {
-                let phy = if matches!(user_config.node_mode, NodeMode::Ht40Emitter) {
-                    EmitterPhy::Ht40Above
-                } else {
-                    EmitterPhy::Ht20
-                };
-                // `--he20=on` replaces either HT PHY with HE20 (802.11ax SU, 20 MHz).
-                #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
-                let phy = if user_config.he20 { EmitterPhy::He20 } else { phy };
-                // `--peer-mac` is the injection destination here (default broadcast); in the
-                // ESP-NOW modes below the same field is the explicit pairing address instead.
-                let mut emitter = EmitterConfig::new(user_config.channel, phy)
-                    .with_period(Duration::from_micros(user_config.inject_period_us as u64));
-                if let Some(mac) = user_config.peer_mac {
-                    emitter = emitter.with_dst_mac(mac);
-                }
-                if !user_config.emitter_use_sta_if {
-                    emitter = emitter.with_ap_interface();
-                }
-                OperationalMode::Emitter(emitter)
-            }
-            // ESP-NOW is one operational mode with two ends; the network role selects which.
-            NodeMode::EspNowCentral => OperationalMode::EspNow(
-                build_espnow_config(&user_config)
-                    .with_network_role(NetworkRole::Central)
-                    .with_reporting(reporting),
-            ),
-            NodeMode::EspNowPeripheral => OperationalMode::EspNow(
-                build_espnow_config(&user_config)
-                    .with_network_role(NetworkRole::Peripheral)
-                    .with_reporting(reporting),
-            ),
-            // The simplex ends changed sides in esp-csi-rs 0.11: the end that floods sources the
-            // traffic and is therefore the central, and the end that beacons and then only
-            // receives is the peripheral. The `--mode` strings are unchanged — they are the
-            // cross-repo serial contract, and `esp-now-fast-collector` still names the collector
-            // correctly — with the model spellings accepted as aliases.
-            NodeMode::EspNowFastCollector => {
-                // `--peer-mac` pairs this end with a known source instead of discovering one, the
-                // same as on the source end (`build_espnow_fast_config`). Both ends need the other's.
-                let mut peer = SimplexConfig::peer(user_config.channel);
-                if let Some(mac) = user_config.peer_mac {
-                    peer = peer.with_peer_mac(mac);
-                }
-                OperationalMode::EspNowSimplex(peer)
-            }
-            NodeMode::EspNowFastSource => OperationalMode::EspNowSimplex(SimplexConfig::source(
-                build_espnow_fast_config(&user_config),
-            )),
-        };
+        // Map NodeMode → an esp-csi-rs mode (shared with `show-config`).
+        let mode = build_mode(&user_config);
 
         // Throughput-oriented modes disable Wi-Fi power saving (matches esp-csi-rs examples).
         if matches!(
             user_config.node_mode,
             NodeMode::WifiAccessPoint
                 | NodeMode::WifiStation
-                | NodeMode::EspNowFastCollector
-                | NodeMode::EspNowFastSource
+                | NodeMode::EspNowSimplexPeer
+                | NodeMode::EspNowSimplexSource
         ) {
             let _ = controller.set_power_saving(PowerSaveMode::None);
         }
 
-        // Non-zero trigger_freq enables traffic generation
-        let traffic_freq = if user_config.trigger_freq == 0 {
-            None
-        } else {
-            Some(user_config.trigger_freq as u16)
-        };
+        // The node-level measurement setup: the acquisition (CSI) config, and the periodicity of
+        // the sounding traffic. A zero periodicity sets none, which disables traffic generation.
+        let mut setup = MeasurementSetup::new().acquisition(user_config.csi_config);
+        if user_config.periodicity_hz > 0 {
+            setup = setup.periodicity_hz(user_config.periodicity_hz);
+        }
 
         // Build hardware handle and construct the CSI node
         let hardware = NodeHardware::new(controller);
-        let mut node = CSINode::new(mode, Some(user_config.csi_config), traffic_freq, hardware);
+        let mut node = CsiNode::new(mode, setup, hardware);
         // CSI delivery gate: `false` keeps capture (and its timing) running but
         // decodes/logs nothing. No effect on an emitter, which captures nothing.
         // The free function, not the node method: the method wrote a flag no CSI path read, so
@@ -841,13 +898,13 @@ async fn csi_collection(controller: &'static mut WifiController<'static>) {
         esp_csi_rs::set_csi_peer_filter(user_config.csi_peer_filter.unwrap_or([0u8; 6]));
         esp_csi_rs::set_csi_min_sig_mode(user_config.csi_min_sig_mode);
         // Apply IO task configuration (TX/RX direction toggles).
-        // `set-traffic --frequency-hz=0` must mean NO generated traffic: with
+        // `set-measurement --periodicity-hz=0` must mean NO generated traffic: with
         // TX left on, esp-csi-rs falls back to a default flood rate when the
-        // frequency is None (100 Hz station / 1000 Hz AP). Restricted to the
+        // periodicity is None (100 Hz station / 1000 Hz AP). Restricted to the
         // WiFi infra modes — an emitter's inject loop and the ESP-NOW pair's own
         // exchange are neither of them the ICMP flood.
         let mut io_tasks = user_config.io_tasks;
-        if user_config.trigger_freq == 0
+        if user_config.periodicity_hz == 0
             && matches!(
                 user_config.node_mode,
                 NodeMode::WifiAccessPoint | NodeMode::WifiStation
@@ -856,7 +913,7 @@ async fn csi_collection(controller: &'static mut WifiController<'static>) {
             io_tasks.tx_enabled = false;
         }
         node.set_io_tasks(io_tasks);
-        // `set-traffic --unsolicited=on`: flood unsolicited echo replies —
+        // `set-measurement --unsolicited=on`: flood unsolicited echo replies —
         // one-directional traffic, no reply contention (see UserConfig doc).
         node.set_flood_unsolicited_reply(user_config.flood_unsolicited);
 
@@ -864,13 +921,13 @@ async fn csi_collection(controller: &'static mut WifiController<'static>) {
         node.set_protocol(user_config.protocol);
 
         // Watcher that translates a CLI STOP_REQUEST into esp-csi-rs's internal
-        // STOP_SIGNAL via the public CSINodeClient::send_stop API. After signaling
+        // STOP_SIGNAL via the public CsiNodeClient::send_stop API. After signaling
         // it parks forever so `select` resolves on the collection arm, letting
         // esp-csi-rs's normal teardown path (reset_globals, etc.) run.
         let stop_watcher = async {
             STOP_REQUEST.wait().await;
             STOP_REQUEST.reset();
-            let stopper = CSINodeClient::new();
+            let stopper = CsiNodeClient::new();
             stopper.send_stop().await;
             core::future::pending::<()>().await
         };
@@ -893,7 +950,7 @@ async fn csi_collection(controller: &'static mut WifiController<'static>) {
         // listens to esp-csi-rs's internal STOP_SIGNAL, so send_stop() unwinds them.
         match duration {
             Some(secs) => {
-                let mut client = CSINodeClient::new();
+                let mut client = CsiNodeClient::new();
                 select(node.run_duration(secs, &mut client), stop_watcher).await;
             }
             None => {
