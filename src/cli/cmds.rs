@@ -4,7 +4,8 @@ use embedded_io::Write;
 use esp_csi_rs::logging::logging::LogMode;
 use esp_csi_rs::logging::logging::set_log_mode as csi_set_log_mode;
 use esp_csi_rs::{
-    CsiDeliveryMode, ReportingPolicy, set_csi_delivery_mode, set_csi_logging_enabled,
+    CsiDeliveryMode, ReportTo, Reporting, SensingRole, SessionRole, set_csi_delivery_mode,
+    set_csi_logging_enabled,
 };
 #[cfg(feature = "statistics")]
 use esp_csi_rs::{
@@ -17,7 +18,7 @@ use esp_radio::wifi::{Protocol, SecondaryChannel};
 use menu::{Item, Menu, argument_finder};
 
 use crate::{
-    NodeMode,
+    NodeMode, build_mode,
     cli::{Context, SerialInterface},
     config::{IS_COLLECTING, START_SIGNAL, USER_CONFIG, UserConfig},
 };
@@ -34,7 +35,14 @@ use crate::{
 /// v3: esp-csi-rs 0.12. `set-log-mode --mode=serialized` now emits the versioned
 /// `esp_csi_rs::wire` format, which a v2 host decoder cannot read. The `info`
 /// grammar itself is unchanged; the bump lets hosts refuse a decoder mismatch.
-pub const CLI_PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: esp-csi-rs 0.13, IEEE 802.11bf naming. `set-wifi --mode=` tokens are
+/// `esp-now-initiator`/`esp-now-responder`/`esp-now-simplex-source`/`esp-now-simplex-peer`
+/// (the central/peripheral/fast spellings are gone), `--collection=` is `--reporting=`,
+/// `set-reporting --policy=` takes `report|none|threshold|decimate`, and `set-traffic
+/// --frequency-hz=` is `set-measurement --periodicity-hz=`. A v3 host would send commands this
+/// firmware rejects. The serialized CSI format is unchanged.
+pub const CLI_PROTOCOL_VERSION: u32 = 4;
 
 /// Read the factory base MAC address from eFuse.
 ///
@@ -65,35 +73,30 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
     if count == 6 { Some(bytes) } else { None }
 }
 
-/// CLI command: `set-traffic`
+/// CLI command: `set-measurement`
 ///
-/// Configures the CSI traffic generation frequency stored in [`USER_CONFIG`].
+/// Configures the node-level measurement setup stored in [`USER_CONFIG`].
 ///
 /// # Options
-/// - `--frequency-hz=<NUMBER>` — Traffic generation rate in Hz. `0` disables traffic.
+/// - `--periodicity-hz=<NUMBER>` — rate of the sounding traffic the node generates, in Hz
+///   (`MeasurementSetup::periodicity_hz`). `0` disables traffic generation.
+/// - `--unsolicited=<on|off>` — ICMP flood sends unsolicited echo replies.
 ///
-/// Prints the updated frequency after applying the change.
-pub fn set_traffic<'a>(
+/// Prints the updated setup after applying the change.
+pub fn set_measurement<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
     args: &[&str],
     serial: &mut SerialInterface,
     _context: &mut Context,
 ) {
-    let traffic_interval = argument_finder(item, args, "frequency-hz");
-
-    match traffic_interval {
-        Ok(str) => {
-            if str.is_some() {
-                match str.unwrap().parse::<u64>() {
-                    Ok(interval) => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().trigger_freq = interval
-                    }),
-                    Err(_) => writeln!(serial, "Invalid Frequency").unwrap(),
-                }
-            }
+    if let Ok(Some(s)) = argument_finder(item, args, "periodicity-hz") {
+        match s.parse::<u16>() {
+            Ok(hz) => USER_CONFIG.lock(|config| {
+                config.borrow_mut().as_mut().unwrap().periodicity_hz = hz
+            }),
+            Err(_) => writeln!(serial, "Invalid --periodicity-hz (use 0-65535)").unwrap(),
         }
-        Err(_) => (),
     }
 
     if let Ok(Some(s)) = argument_finder(item, args, "unsolicited") {
@@ -105,14 +108,14 @@ pub fn set_traffic<'a>(
         }
     }
 
-    writeln!(serial, "\nUpdated Traffic Configuration:\n").unwrap();
+    writeln!(serial, "\nUpdated Measurement Setup:\n").unwrap();
     USER_CONFIG.lock(|config| {
         let config = config.borrow();
         let config = config.as_ref().unwrap();
         writeln!(
             serial,
-            "Traffic Frequency: {}Hz\nICMP Flood Kind: {}",
-            config.trigger_freq,
+            "Periodicity: {} Hz\nICMP Flood Kind: {}",
+            config.periodicity_hz,
             if config.flood_unsolicited {
                 "unsolicited echo replies (one-directional)"
             } else {
@@ -135,56 +138,150 @@ fn parse_on_off(s: &str) -> Option<bool> {
     }
 }
 
-/// Human-readable form of a reporting policy: `collector`, `listener`, `threshold (...)` or
-/// `decimate (...)`. The first two keep the pre-0.12 `--collection` vocabulary.
-fn policy_str(policy: ReportingPolicy) -> heapless::String<48> {
+/// Human-readable form of a reporting value: `report (host)`, `report (local)`, `none`,
+/// `threshold (...)` or `decimate N`.
+fn reporting_str(reporting: Reporting) -> heapless::String<64> {
     let mut out = heapless::String::new();
-    let _ = match policy {
-        ReportingPolicy::Always => core::fmt::Write::write_str(&mut out, "collector"),
-        ReportingPolicy::Never => core::fmt::Write::write_str(&mut out, "listener"),
-        ReportingPolicy::Threshold(t) => core::fmt::Write::write_fmt(
+    let _ = match reporting {
+        Reporting::Report { to: ReportTo::Local } => {
+            core::fmt::Write::write_str(&mut out, "report (local)")
+        }
+        Reporting::Report { .. } => core::fmt::Write::write_str(&mut out, "report (host)"),
+        Reporting::None => core::fmt::Write::write_str(&mut out, "none"),
+        Reporting::ThresholdBased(t) => core::fmt::Write::write_fmt(
             &mut out,
             format_args!("threshold (level={}, hold={}ms)", t.level, t.hold_ms),
         ),
-        ReportingPolicy::Decimate(n) => {
-            core::fmt::Write::write_fmt(&mut out, format_args!("decimate (every {})", n))
+        Reporting::Decimate(n) => {
+            core::fmt::Write::write_fmt(&mut out, format_args!("decimate {}", n))
         }
         _ => core::fmt::Write::write_str(&mut out, "other"),
     };
     out
 }
 
-/// The reporting policy the next run will use, as printed by `show-config` and `set-wifi`.
+/// The reporting the next run will use, as printed by `show-config`, `set-wifi` and
+/// `set-reporting`. Read back from the same [`esp_csi_rs::Mode`] the run is built with.
 ///
-/// ESP-NOW, station and access point take any policy. A sniffer takes all but `listener`. Every
+/// ESP-NOW, station and access point take any value. A sniffer takes all but `none`. Every
 /// other mode fixes the attribute, so the fixed value is shown rather than a setting it ignores.
-fn collection_mode_str(cfg: &UserConfig) -> heapless::String<48> {
-    let fixed = |s: &str| {
-        let mut out = heapless::String::new();
-        let _ = out.push_str(s);
-        out
-    };
-    match cfg.node_mode {
-        NodeMode::EspNowFastCollector => fixed("collector (fixed by mode)"),
-        NodeMode::Ht20Emitter | NodeMode::Ht40Emitter | NodeMode::EspNowFastSource => {
-            fixed("listener (fixed by mode)")
-        }
-        NodeMode::WifiSniffer if cfg.reporting == ReportingPolicy::Never => {
-            fixed("collector (a sniffer cannot listen)")
-        }
-        _ => policy_str(cfg.reporting),
+fn reporting_line(cfg: &UserConfig) -> heapless::String<96> {
+    let mut out: heapless::String<96> = heapless::String::new();
+    let _ = out.push_str(&reporting_str(build_mode(cfg).reporting()));
+    if !cfg.node_mode.reads_reporting() {
+        let _ = out.push_str(" (fixed by mode)");
+    } else if cfg.node_mode == NodeMode::WifiSniffer && cfg.reporting == Reporting::None {
+        let _ = out.push_str(" (a sniffer cannot report none)");
+    }
+    out
+}
+
+fn session_role_str(role: Option<SessionRole>) -> &'static str {
+    match role {
+        Some(SessionRole::Initiator) => "initiator",
+        Some(SessionRole::Responder) => "responder",
+        Some(_) => "other",
+        None => "none (observer)",
     }
 }
 
-/// Parse a `--collection=` / `--policy=` value against the stored threshold / decimation
-/// parameters. `collector`/`listener` are the pre-0.12 spellings of `always`/`never`.
-fn parse_policy(s: &str, cfg: &UserConfig) -> Option<ReportingPolicy> {
+fn sensing_role_str(role: SensingRole) -> &'static str {
+    match role {
+        SensingRole::Transmitter => "transmitter",
+        SensingRole::Receiver => "receiver",
+        SensingRole::TransmitterReceiver => "transmitter-receiver",
+        _ => "other",
+    }
+}
+
+/// Print the node's mode, roles and reporting: the lines `show-config` and `set-wifi` share.
+///
+/// The session role is a choice on the ESP-NOW pair (the `--mode` token picks the end) and on the
+/// station (the initiator while `--periodicity-hz` > 0, otherwise an observer); every other mode,
+/// and the sensing role everywhere, is fixed by the mode.
+fn write_node_attributes(serial: &mut SerialInterface, cfg: &UserConfig, indent: &str) {
+    let mode = build_mode(cfg);
+    let session_fixed = !matches!(
+        cfg.node_mode,
+        NodeMode::EspNowInitiator | NodeMode::EspNowResponder | NodeMode::WifiStation
+    );
+    writeln!(serial, "{}Mode: {}", indent, cfg.node_mode.token()).unwrap();
+    writeln!(
+        serial,
+        "{}Session role: {}{}",
+        indent,
+        session_role_str(mode.session_role()),
+        if session_fixed { " (fixed by mode)" } else { "" }
+    )
+    .unwrap();
+    writeln!(
+        serial,
+        "{}Sensing role: {} (fixed by mode)",
+        indent,
+        sensing_role_str(mode.sensing_role())
+    )
+    .unwrap();
+    writeln!(serial, "{}Reporting: {}", indent, reporting_line(cfg)).unwrap();
+}
+
+/// Parse a `--reporting=` / `--policy=` value against the stored destination, threshold and
+/// decimation parameters. No aliases: the pre-0.10 `collector|listener|always|never` are rejected.
+fn parse_reporting(s: &str, cfg: &UserConfig) -> Option<Reporting> {
     match s.to_ascii_lowercase().as_str() {
-        "collector" | "always" => Some(ReportingPolicy::Always),
-        "listener" | "never" => Some(ReportingPolicy::Never),
-        "threshold" => Some(ReportingPolicy::Threshold(cfg.threshold)),
-        "decimate" => Some(ReportingPolicy::Decimate(cfg.decimate_n)),
+        "report" => Some(Reporting::Report { to: cfg.report_to }),
+        "none" => Some(Reporting::None),
+        "threshold" => Some(Reporting::ThresholdBased(cfg.threshold)),
+        "decimate" => Some(Reporting::Decimate(cfg.decimate_n)),
         _ => None,
+    }
+}
+
+/// Parse a `--report-to=` value.
+fn parse_report_to(s: &str) -> Option<ReportTo> {
+    match s.to_ascii_lowercase().as_str() {
+        "host" => Some(ReportTo::Host),
+        "local" => Some(ReportTo::Local),
+        _ => None,
+    }
+}
+
+const SNIFFER_NONE_ERROR: &str =
+    "Invalid --reporting=none for sniffer: a sniffer that reports nothing observes nothing (use report|threshold|decimate)";
+
+/// Apply `--report-to=` and then a `--reporting=`/`--policy=` value (either may be absent) to the
+/// config. `flag` names the reporting flag in error messages. Refuses `none` on a sniffer.
+fn apply_reporting_flags(
+    serial: &mut SerialInterface,
+    cfg: &mut UserConfig,
+    flag: &str,
+    value: Option<&str>,
+    report_to: Option<&str>,
+) {
+    if let Some(v) = report_to {
+        match parse_report_to(v) {
+            Some(to) => {
+                cfg.report_to = to;
+                // Re-derive an active `report` so the destination applies without restating it.
+                if let Reporting::Report { .. } = cfg.reporting {
+                    cfg.reporting = Reporting::Report { to };
+                }
+            }
+            None => writeln!(serial, "Invalid --report-to (use host|local)").unwrap(),
+        }
+    }
+    if let Some(v) = value {
+        match parse_reporting(v, cfg) {
+            Some(Reporting::None) if cfg.node_mode == NodeMode::WifiSniffer => {
+                writeln!(serial, "{}", SNIFFER_NONE_ERROR).unwrap()
+            }
+            Some(r) => cfg.reporting = r,
+            None => writeln!(
+                serial,
+                "Invalid --{} (use report|none|threshold|decimate)",
+                flag
+            )
+            .unwrap(),
+        }
     }
 }
 
@@ -459,10 +556,7 @@ pub fn set_csi<'a>(
 /// Configures WiFi/radio operating parameters stored in [`USER_CONFIG`].
 ///
 /// # Options
-/// - `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-central|esp-now-peripheral|esp-now-fast-collector|esp-now-fast-source>` — Operational mode.
-///   `esp-now-simplex-peer` and `esp-now-simplex-source` are accepted as aliases of
-///   `esp-now-fast-collector` (the peripheral collector end) and `esp-now-fast-source`
-///   (the central listener end).
+/// - `--mode=<station|sniffer|wifi-ap|ht20-emitter|ht40-emitter|esp-now-initiator|esp-now-responder|esp-now-simplex-source|esp-now-simplex-peer>` — Mode.
 /// - `--sta-ssid=<SSID>` — SSID for Station mode. Wrap in `'...'` or `"..."` to include spaces; underscores are passed through literally.
 /// - `--sta-password=<PASSWORD>` — Password for Station mode. Same quoting rules as `--sta-ssid`.
 /// - `--ap-ssid=<SSID>` — SSID for wifi-ap mode. Same quoting rules as `--sta-ssid`.
@@ -472,7 +566,7 @@ pub fn set_csi<'a>(
 ///   one lease the ICMP flood round-robins across all associated stations.
 /// - `--ap-burst=<on|off>` — Synchronized burst flood in wifi-ap mode. Every
 ///   tick sends one frame back-to-back to every associated station for
-///   time-aligned multi-receiver CSI (total airtime = frequency-hz × leases).
+///   time-aligned multi-receiver CSI (total airtime = periodicity-hz × leases).
 /// - `--set-channel=<NUMBER>` — WiFi channel (1–14; the ESP32-C5 also takes 5 GHz channels).
 /// - `--peer-mac=<aa:bb:cc:dd:ee:ff>` — emitter injection destination, or explicit ESP-NOW peer
 ///   (all ESP-NOW modes, simplex included; set it on both nodes).
@@ -481,8 +575,10 @@ pub fn set_csi<'a>(
 /// - `--emitter-iface=<sta|ap>` — interface an emitter injects on.
 /// - `--ht40=<above|below|none>` — softAP secondary channel in `wifi-ap`, and the forced per-peer
 ///   TX PHY in the ESP-NOW modes.
-/// - `--collection=<collector|listener>` — the node's collection mode. Read only by the modes that
-///   admit a choice (ESP-NOW central/peripheral, station, wifi-ap); the others fix it.
+/// - `--reporting=<report|none|threshold|decimate>` — the node's reporting. Read only by the modes
+///   that admit a choice (ESP-NOW initiator/responder, station, wifi-ap, and the sniffer, which
+///   refuses `none`); the others fix it.
+/// - `--report-to=<host|local>` — where `report` sends measurements (default host).
 ///
 /// Prints the updated WiFi configuration after applying changes.
 pub fn set_wifi<'a>(
@@ -515,42 +611,17 @@ pub fn set_wifi<'a>(
     match mode {
         Ok(str) => {
             if str.is_some() {
-                match str.unwrap() {
-                    "sniffer" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiSniffer;
+                let token = str.unwrap();
+                match NodeMode::from_token(token) {
+                    Some(m) => USER_CONFIG.lock(|config| {
+                        config.borrow_mut().as_mut().unwrap().node_mode = m;
                     }),
-                    "station" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiStation;
-                    }),
-                    "wifi-ap" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::WifiAccessPoint;
-                    }),
-                    "ht20-emitter" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::Ht20Emitter;
-                    }),
-                    "ht40-emitter" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::Ht40Emitter;
-                    }),
-                    "esp-now-central" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode = NodeMode::EspNowCentral;
-                    }),
-                    "esp-now-peripheral" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode =
-                            NodeMode::EspNowPeripheral;
-                    }),
-                    // Two spellings for each simplex end. The `-fast-` strings are the
-                    // cross-repo serial contract and keep working; the `-simplex-` ones match the
-                    // node model, where the end that floods is the central and the receive-only
-                    // end is the peripheral.
-                    "esp-now-fast-collector" | "esp-now-simplex-peer" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode =
-                            NodeMode::EspNowFastCollector;
-                    }),
-                    "esp-now-fast-source" | "esp-now-simplex-source" => USER_CONFIG.lock(|config| {
-                        config.borrow_mut().as_mut().unwrap().node_mode =
-                            NodeMode::EspNowFastSource;
-                    }),
-                    _ => writeln!(serial, "Invalid WiFi Mode").unwrap(),
+                    None => writeln!(
+                        serial,
+                        "Invalid WiFi Mode '{}' (use sniffer|station|wifi-ap|ht20-emitter|ht40-emitter|esp-now-initiator|esp-now-responder|esp-now-simplex-source|esp-now-simplex-peer)",
+                        token
+                    )
+                    .unwrap(),
                 }
             }
         }
@@ -707,30 +778,22 @@ pub fn set_wifi<'a>(
             .unwrap(),
         }
     }
-    // The node's collection mode — whether its measurements leave it. Only the modes that admit a
-    // choice read it; on the ESP-NOW modes it also goes on the wire, so a peripheral paired with a
-    // listening central can promote itself.
-    if let Ok(Some(v)) = argument_finder(item, args, "collection") {
-        let ok = USER_CONFIG.lock(|config| {
-            let mut cfg = config.borrow_mut();
-            let cfg = cfg.as_mut().unwrap();
-            match parse_policy(v, cfg) {
-                Some(p) => {
-                    cfg.reporting = p;
-                    true
-                }
-                None => false,
-            }
-        });
-        if !ok {
-            writeln!(
-                serial,
-                "Invalid --collection (use collector|listener|threshold|decimate)"
-            )
-            .unwrap();
+    // The node's reporting — whether its measurements leave it. Only the modes that admit a
+    // choice read it; on the ESP-NOW modes it also goes on the wire, so a responder paired with an
+    // initiator that reports nothing can promote itself. Applied after `--mode`, so the sniffer
+    // check sees the mode set in the same command.
+    {
+        let value = argument_finder(item, args, "reporting").ok().flatten();
+        let report_to = argument_finder(item, args, "report-to").ok().flatten();
+        if value.is_some() || report_to.is_some() {
+            USER_CONFIG.lock(|config| {
+                let mut cfg = config.borrow_mut();
+                let cfg = cfg.as_mut().unwrap();
+                apply_reporting_flags(serial, cfg, "reporting", value, report_to);
+            });
         }
     }
-    // HE20 (802.11ax SU) on the emitter modes and the ESP-NOW central/peripheral pair.
+    // HE20 (802.11ax SU) on the emitter modes and the ESP-NOW initiator/responder pair.
     #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
     if let Ok(Some(v)) = argument_finder(item, args, "he20") {
         match parse_on_off(v) {
@@ -769,12 +832,7 @@ pub fn set_wifi<'a>(
 
     writeln!(serial, "\nUpdated WiFi Configuration:\n").unwrap();
     USER_CONFIG.lock(|config| {
-        writeln!(
-            serial,
-            "WiFi Mode: {:?}",
-            config.borrow().as_ref().unwrap().node_mode
-        )
-        .unwrap();
+        write_node_attributes(serial, config.borrow().as_ref().unwrap(), "");
         writeln!(
             serial,
             "WiFi Channel: {:?}",
@@ -825,7 +883,6 @@ pub fn set_wifi<'a>(
         };
         writeln!(serial, "Secondary Channel: {}", ht40_str).unwrap();
         writeln!(serial, "Emitter Period: {}us", cfg.inject_period_us).unwrap();
-        writeln!(serial, "Collection: {}", collection_mode_str(cfg)).unwrap();
         #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         writeln!(serial, "HE20: {}", cfg.he20).unwrap();
     });
@@ -932,7 +989,7 @@ pub fn set_csi_output<'a>(
 ///
 /// Restricts which captured frames are delivered, by source MAC and/or PHY class.
 ///
-/// A collector is promiscuous by nature — it reports CSI for every frame its radio decodes. On a
+/// A reporting receiver is promiscuous by nature — it reports CSI for every frame its radio decodes. On a
 /// busy channel that means the AP's own beacons and ACKs, the association exchange, and any
 /// third-party device on the channel, all mixed in with the traffic the user configured. Those rows
 /// are real CSI, but they read as corrupt: the leading field is the frame's own 802.11 sequence
@@ -1096,7 +1153,7 @@ pub fn set_log_mode<'a>(
 /// CLI command: `show-config`
 ///
 /// Prints a formatted summary of the current [`USER_CONFIG`] to the serial interface,
-/// grouped into three sections: `[WiFi]`, `[Collection]`, and `[CSI Config]`.
+/// grouped into four sections: `[Node]`, `[WiFi]`, `[Measurement]`, and `[CSI Config]`.
 ///
 /// CSI Config fields are platform-specific: ESP32-C5/C6 expose per-PPDU-format
 /// acquisition flags while all other targets expose classic LLTF/HTLTF fields.
@@ -1113,9 +1170,13 @@ pub fn show_config<'a>(
 
         writeln!(serial, "\n====== Current Configuration ======\n").unwrap();
 
-        // Node / WiFi settings
-        writeln!(serial, "[WiFi]").unwrap();
-        writeln!(serial, "  Mode    : {:?}", cfg.node_mode).unwrap();
+        // Node attributes (IEEE 802.11bf terms), read back from the Mode the run is built with.
+        writeln!(serial, "[Node]").unwrap();
+        write_node_attributes(serial, cfg, "  ");
+        writeln!(serial, "  Periodicity: {} Hz", cfg.periodicity_hz).unwrap();
+
+        // WiFi settings
+        writeln!(serial, "\n[WiFi]").unwrap();
         writeln!(serial, "  Channel : {}", cfg.channel).unwrap();
         if matches!(cfg.node_mode, NodeMode::WifiStation) {
             #[cfg(feature = "esp32c5")]
@@ -1155,9 +1216,17 @@ pub fn show_config<'a>(
         #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
         writeln!(serial, "  HE20    : {}", cfg.he20).unwrap();
 
-        // Collection settings
-        writeln!(serial, "\n[Collection]").unwrap();
-        writeln!(serial, "  Collection    : {}", collection_mode_str(cfg)).unwrap();
+        // Measurement / reporting settings
+        writeln!(serial, "\n[Measurement]").unwrap();
+        writeln!(
+            serial,
+            "  Report to     : {}",
+            match cfg.report_to {
+                ReportTo::Local => "local",
+                _ => "host",
+            }
+        )
+        .unwrap();
         writeln!(
             serial,
             "  Threshold     : level={}, hold={}ms; Decimate n={}",
@@ -1181,7 +1250,6 @@ pub fn show_config<'a>(
             if cfg.csi_min_sig_mode == 0 { "any" } else { "ht" }
         )
         .unwrap();
-        writeln!(serial, "  Traffic Freq  : {}Hz", cfg.trigger_freq).unwrap();
         writeln!(serial, "  PHY Rate      : {:?}", cfg.phy_rate).unwrap();
         writeln!(serial, "  Protocol      : {:?}", cfg.protocol).unwrap();
         writeln!(
@@ -1327,9 +1395,9 @@ pub fn reset_config<'a>(
 /// CLI command: `set-rate`
 ///
 /// Records the Wi-Fi PHY rate in [`USER_CONFIG`] for `show-config`. No mode
-/// applies it any more: collectors derive their rate from the surrounding radio
+/// applies it any more: receivers derive their rate from the surrounding radio
 /// configuration, and an emitter transmits at the rate its forced TX PHY implies. The
-/// ESP-NOW central / peripheral pair DOES apply it, as the per-peer TX PHY.
+/// ESP-NOW initiator / responder pair DOES apply it, as the per-peer TX PHY.
 ///
 /// # Options
 /// - `--rate=<NAME>` — One of: `mcs0-lgi`, `mcs1-lgi`, `mcs2-lgi`, `mcs3-lgi`,
@@ -1391,7 +1459,7 @@ pub fn set_phy_rate<'a>(
 /// CLI command: `set-protocol`
 ///
 /// Sets the Wi-Fi PHY protocol stored in [`USER_CONFIG`] and applied to the
-/// node via `CSINode::set_protocol` at the start of each collection run.
+/// node via `CsiNode::set_protocol` at the start of each collection run.
 ///
 /// # Options
 /// - `--protocol=<NAME>` — One of: `b`, `g`, `n`, `lr`, `a`, `ac`, and `ax` on the ESP32-C5/C6
@@ -1495,7 +1563,7 @@ pub fn set_io_tasks_cmd<'a>(
 ///
 /// # Options
 /// - `--mode=<off|callback|async>` — Pick how the WiFi callback hands CSI
-///   packets out. `async` queues to `CSINodeClient::next_csi_packet`,
+///   packets out. `async` queues to `CsiNodeClient::next_csi_packet`,
 ///   `callback` invokes the inline `set_csi_callback` hook, `off` drops
 ///   the dispatch entirely.
 /// - `--logging=<on|off>` — Toggle the inline `log_csi` per-packet UART/JTAG
@@ -1791,18 +1859,18 @@ pub fn show_stats<'a>(
 
 /// CLI command: `set-reporting`
 ///
-/// Sets the node's reporting policy and its parameters. A superset of
-/// `set-wifi --collection=`, which picks the policy but not its parameters.
+/// Sets the node's reporting and its parameters. A superset of
+/// `set-wifi --reporting=`, which picks the value but not its parameters.
 ///
 /// # Options
-/// - `--policy=<always|never|threshold|decimate>` — `collector`/`listener` are accepted for
-///   `always`/`never`.
+/// - `--policy=<report|none|threshold|decimate>` — the reporting (a sniffer refuses `none`).
+/// - `--report-to=<host|local>` — where `report` sends measurements (default host).
 /// - `--level=<0-65535>` — threshold score at or above which a measurement is reported.
 /// - `--hold-ms=<ms>` — how long to keep reporting after a measurement crosses `level`.
 /// - `--n=<N>` — decimation: report every N-th measurement.
 ///
-/// Parameters are stored even when another policy is active, and take effect immediately when the
-/// matching policy already is.
+/// Parameters are stored even when another value is active, and take effect immediately when the
+/// matching value already is.
 pub fn set_reporting_cmd<'a>(
     _menu: &Menu<SerialInterface, Context>,
     item: &Item<SerialInterface, Context>,
@@ -1831,25 +1899,18 @@ pub fn set_reporting_cmd<'a>(
                 _ => writeln!(serial, "Invalid --n (use 1-65535)").unwrap(),
             }
         }
-        // Re-derive an active parameterised policy so new parameters apply without restating it.
+        // Re-derive an active parameterised value so new parameters apply without restating it.
         match cfg.reporting {
-            ReportingPolicy::Threshold(_) => {
-                cfg.reporting = ReportingPolicy::Threshold(cfg.threshold)
+            Reporting::ThresholdBased(_) => {
+                cfg.reporting = Reporting::ThresholdBased(cfg.threshold)
             }
-            ReportingPolicy::Decimate(_) => cfg.reporting = ReportingPolicy::Decimate(cfg.decimate_n),
+            Reporting::Decimate(_) => cfg.reporting = Reporting::Decimate(cfg.decimate_n),
             _ => {}
         }
-        if let Ok(Some(v)) = argument_finder(item, args, "policy") {
-            match parse_policy(v, cfg) {
-                Some(p) => cfg.reporting = p,
-                None => writeln!(
-                    serial,
-                    "Invalid --policy (use always|never|threshold|decimate)"
-                )
-                .unwrap(),
-            }
-        }
-        writeln!(serial, "\nReporting: {}", collection_mode_str(cfg)).unwrap();
+        let value = argument_finder(item, args, "policy").ok().flatten();
+        let report_to = argument_finder(item, args, "report-to").ok().flatten();
+        apply_reporting_flags(serial, cfg, "policy", value, report_to);
+        writeln!(serial, "\nReporting: {}", reporting_line(cfg)).unwrap();
     });
 }
 

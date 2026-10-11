@@ -5,7 +5,7 @@ rather than the radio.
 
 ## Console throughput
 
-**The console, not the radio, is usually what limits your sample rate.** A collector captures at the
+**The console, not the radio, is usually what limits your sample rate.** A receiver captures at the
 offered traffic rate; whether you *see* those samples depends on how many bytes each one costs on the
 serial link.
 
@@ -27,7 +27,7 @@ that figure is the ceiling for that format at that baud. At 921600 `array-list` 
 rate, and what limits the other two rows there is how many frames the radio captured, not the
 console.
 
-Expect run-to-run variance: on a shared 2.4 GHz channel the number of frames a collector actually
+Expect run-to-run variance: on a shared 2.4 GHz channel the number of frames a receiver actually
 captures moved by more than 2x between sessions on the same bench, with the boards untouched. Compare
 against `show-stats`' own `RX Total Packets` rather than against a number from a previous run.
 

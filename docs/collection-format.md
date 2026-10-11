@@ -13,7 +13,7 @@ start at zero and does not share a counter with your traffic. Your data flood ap
 because QoS data frames use their own TID counter, separate from the management frames that precede
 them.
 
-**A different payload length is a different PHY, and often a different device.** A collector is
+**A different payload length is a different PHY, and often a different device.** A reporting receiver is
 promiscuous; it reports CSI for every frame its radio decodes:
 
 | `csi_data_len` | `sig_mode` | what it is |

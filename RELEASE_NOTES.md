@@ -1,5 +1,63 @@
 # Release Notes
 
+## v0.10.0
+
+Highlights: the CLI moves to **esp-csi-rs 0.13** and the **IEEE 802.11bf vocabulary**. Where
+802.11bf has a word for a concept, the CLI now uses it. This is a hard cut: the old spellings
+are rejected, not aliased, and `info` reports `protocol=4` so a host can refuse a mismatch.
+
+### Command changes (BREAKING)
+
+| Before (0.9) | Now (0.10) |
+|---|---|
+| `set-wifi --mode=esp-now-central` | `set-wifi --mode=esp-now-initiator` |
+| `set-wifi --mode=esp-now-peripheral` | `set-wifi --mode=esp-now-responder` |
+| `set-wifi --mode=esp-now-fast-source` / `esp-now-simplex-source` | `set-wifi --mode=esp-now-simplex-source` |
+| `set-wifi --mode=esp-now-fast-collector` / `esp-now-simplex-peer` | `set-wifi --mode=esp-now-simplex-peer` |
+| `set-wifi --collection=collector\|listener\|threshold\|decimate` | `set-wifi --reporting=report\|none\|threshold\|decimate` |
+| `set-reporting --policy=always\|never\|threshold\|decimate` | `set-reporting --policy=report\|none\|threshold\|decimate` |
+| — | `--report-to=host\|local` on `set-wifi` and `set-reporting` |
+| `set-traffic --frequency-hz=N [--unsolicited=on\|off]` | `set-measurement --periodicity-hz=N [--unsolicited=on\|off]` |
+| `info`: `protocol=3` | `info`: `protocol=4` |
+
+- **`--report-to=host|local`.** `report` sends every measurement to the host output (`host`,
+  the default) or only to on-device consumers (`local`: callback/queue, nothing on the serial
+  output). The destination is remembered, so switching to `threshold` and back keeps it.
+- **A sniffer refuses `none`.** `set-wifi --reporting=none` / `set-reporting --policy=none` on a
+  sniffer prints an error and leaves the setting unchanged: a sniffer that reports nothing
+  observes nothing.
+- **Station session role.** A station is the session's initiator while it drives its gateway
+  ping (`--periodicity-hz` > 0) and an observer (no session role) at `--periodicity-hz=0`.
+- The serialized CSI format (`set-log-mode --mode=serialized`) and the ESP-NOW over-the-air
+  protocol are unchanged; the protocol bump is for the command grammar.
+
+### `show-config` and `set-wifi` output
+
+Both now print the node's attributes, read back from the esp-csi-rs `Mode` the next run is built
+with rather than restated by hand:
+
+```text
+[Node]
+  Mode: esp-now-initiator
+  Session role: initiator
+  Sensing role: transmitter-receiver (fixed by mode)
+  Reporting: report (host)
+  Periodicity: 100 Hz
+```
+
+`Reporting` is one of `report (host)`, `report (local)`, `none`, `threshold (level=…, hold=…ms)`
+or `decimate N`; values a mode does not let you choose carry `(fixed by mode)`. The
+`[Collection]` section is now `[Measurement]`, and its `Traffic Freq` line is replaced by
+`Periodicity` in `[Node]`.
+
+### Internals
+
+- Built against esp-csi-rs 0.13 (`Mode`, `CsiNode`, `MeasurementSetup`, `SessionRole`,
+  `SensingRole`, `Reporting`/`ReportTo`). The node is constructed with
+  `CsiNode::new(mode, MeasurementSetup::new().acquisition(..).periodicity_hz(..), hw)`.
+- Until esp-csi-rs 0.13.0 is published, `Cargo.toml` carries a temporary
+  `[patch.crates-io]` path override to `../esp-csi-rs`.
+
 ## v0.8.0
 
 Highlights: the CLI moves to the **esp-csi-rs 0.11 node model**, adds the emitter

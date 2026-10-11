@@ -36,7 +36,7 @@ pub fn enter_root(
         .write_str(
             "Available Commands:
     set-wifi                Configure WiFi settings (e.g., mode).
-    set-traffic             Configure traffic-related parameters (e.g. interval).
+    set-measurement         Configure the measurement setup (periodicity in Hz).
     set-csi-output          Toggle off-device delivery of captured CSI (true|false).
     set-csi-filter          Restrict delivered CSI by source MAC and/or PHY class.
     set-log-mode            Set the CSI output logging format (text, array-list, serialized).
@@ -44,7 +44,7 @@ pub fn enter_root(
     set-rate                Set the Wi-Fi PHY rate (applied on the ESP-NOW pair).
     set-io-tasks            Toggle TX and/or RX direction tasks.
     set-csi-delivery        Switch CSI delivery mode and inline log gate.
-    set-reporting           Set the reporting policy (always, never, threshold, decimate).
+    set-reporting           Set the reporting (report, none, threshold, decimate).
     set-session             Name the measurement session (id, wall-clock epoch).
     start                   Start the CSI collection process with a defined duration.
     show-config             Display the current configuration settings.
@@ -59,7 +59,7 @@ pub fn enter_root(
     help <command>
 
     Example:
-    help set-traffic",
+    help set-measurement",
         )
         .unwrap();
     // interface.flush().unwrap();

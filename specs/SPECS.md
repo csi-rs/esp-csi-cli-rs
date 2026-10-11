@@ -20,8 +20,8 @@ Sources of truth:
 > `espflash monitor`.
 >
 > For web-server / host-automation integration (REST mapping, pairing presets),
-> see [`WEBSERVER.md`](WEBSERVER.md). The terms operational mode, network role
-> and collection mode are defined by the
+> see [`WEBSERVER.md`](WEBSERVER.md). The terms mode, session role, sensing role
+> and reporting (IEEE 802.11bf vocabulary) are defined by the
 > [esp-csi-rs node model](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
 
 ---
@@ -55,38 +55,43 @@ is bypassed and only `q`/`Q` is acted on. All other bytes are read but ignored.
 On a `START_SIGNAL` the task (`src/main.rs:562`):
 
 1. Snapshots `USER_CONFIG`.
-2. Maps `node_mode` → an `esp-csi-rs` `OperationalMode`. `collection` below is
-   the `ReportingPolicy` in `reporting` (`set-wifi --collection`, `set-reporting`);
-   it is passed only to the modes that admit a choice.
-   - `WifiSniffer` → `Sniffer(WifiSnifferConfig { channel })` — peripheral collector; takes a
-     `Threshold` / `Decimate` policy, ignores `Never`
+2. Maps `node_mode` → an `esp-csi-rs` `Mode` via `build_mode(&UserConfig)` (also
+   used by `show-config`, so what it prints is read back from the same `Mode`).
+   `reporting` below is the `Reporting` in `UserConfig.reporting`
+   (`set-wifi --reporting`, `set-reporting`); it is passed only to the modes that
+   admit a choice.
+   - `WifiSniffer` → `Sniffer(WifiSnifferConfig { channel })` — observer, receiver; takes
+     `Report { to }` / `ThresholdBased` / `Decimate`; a stale `None` falls back to
+     `Report { to: Host }` (the CLI refuses `none` on a sniffer)
    - `WifiStation` → `Station(WifiStationConfig { ssid, password, WPA2-Personal or open,
-     channel_hint = channel, collection })`
+     channel_hint = channel, session = Some(Initiator) if periodicity_hz > 0 else None,
+     reporting })`
    - `WifiAccessPoint` → `AccessPoint(WifiApConfig { ap, channel, ht40, dhcp, leases, burst,
-     collection })` — always central
+     reporting })` — always the initiator, receiver
    - `Ht20Emitter` / `Ht40Emitter` → `Emitter(EmitterConfig { channel, Ht20|Ht40Above,
-     period = inject_period_us [, dst_mac = peer_mac] [, ap_interface] })` — central
-     listener, fixed
-   - `EspNowCentral` → `EspNow(EspNowConfig { channel, phy_rate [, peer_mac] [, ht40],
-     network_role = Central, collection })`
-   - `EspNowPeripheral` → `EspNow(...)`, same config builder, `network_role = Peripheral`
-   - `EspNowFastCollector` → `EspNowSimplex(SimplexConfig::peer(channel) [.with_peer_mac(peer_mac)])`
-     — the peer end, a peripheral collector, fixed
-   - `EspNowFastSource` → `EspNowSimplex(SimplexConfig::source(EspNowConfig::fast_default()
-     { channel [, peer_mac] [, ht40] }))` — the source end, a central listener, fixed
-3. For `WifiAccessPoint`, `WifiStation`, `EspNowFastCollector` and
-   `EspNowFastSource`, calls
+     period = inject_period_us [, dst_mac = peer_mac] [, ap_interface] })` — observer,
+     transmitter, reports none; fixed
+   - `EspNowInitiator` → `EspNow(EspNowConfig { channel, phy_rate [, peer_mac] [, ht40],
+     session = Initiator, reporting })` — transmitter-receiver
+   - `EspNowResponder` → `EspNow(...)`, same config builder, `session = Responder`
+   - `EspNowSimplexPeer` → `EspNowSimplex(SimplexConfig::peer(channel) [.with_peer_mac(peer_mac)])`
+     — the peer end: responder, receiver, reports; fixed
+   - `EspNowSimplexSource` → `EspNowSimplex(SimplexConfig::source(EspNowConfig::fast_default()
+     { channel [, peer_mac] [, ht40] }))` — the source end: initiator, transmitter,
+     reports none; fixed
+3. For `WifiAccessPoint`, `WifiStation`, `EspNowSimplexPeer` and
+   `EspNowSimplexSource`, calls
    `controller.set_power_saving(PowerSaveMode::None)`.
-4. Computes traffic frequency: `trigger_freq == 0` → `None` (traffic generator
-   off); otherwise `Some(trigger_freq as u16)` (note the `u64 → u16` cast —
-   values > 65535 silently truncate).
-5. Constructs `CSINode::new(...)`, then applies the free function
+4. Builds the node-level `MeasurementSetup`: `.acquisition(csi_config)`, plus
+   `.periodicity_hz(periodicity_hz)` when `periodicity_hz > 0` (`0` sets no
+   periodicity: traffic generator off).
+5. Constructs `CsiNode::new(mode, setup, hardware)`, then applies the free function
    `esp_csi_rs::set_csi_output_enabled(csi_output_enabled)`, the CSI filters
    (`set_csi_peer_filter`, `set_csi_min_sig_mode`, re-applied every run),
    `set_io_tasks(io_tasks)` (TX forced off for station/AP when
-   `trigger_freq == 0`) and `set_flood_unsolicited_reply(flood_unsolicited)`.
+   `periodicity_hz == 0`) and `set_flood_unsolicited_reply(flood_unsolicited)`.
 6. Applies `node.set_protocol(user_config.protocol)` (set via `set-protocol`;
-   default `LR`). `phy_rate` is applied only by the ESP-NOW central/peripheral
+   default `LR`). `phy_rate` is applied only by the ESP-NOW initiator/responder
    modes, as the per-peer TX PHY.
 7. Registers the CSI delivery path for the run:
    - If `delivery_raw` (`set-csi-delivery --mode=raw`): `set_csi_logging_enabled(false)`
@@ -97,9 +102,9 @@ On a `START_SIGNAL` the task (`src/main.rs:562`):
      peeks the JTAG OUT-EP FIFO for `q`/`Q` and signals `STOP_REQUEST`, and (b)
      clones the packet into `log_csi` so CSI lines stream to the host.
 8. Runs:
-   - `Some(secs)` → `CSINode::run_duration(secs, client)` raced against a stop
+   - `Some(secs)` → `CsiNode::run_duration(secs, client)` raced against a stop
      watcher.
-   - `None` → `CSINode::run()` raced against the stop watcher (indefinite).
+   - `None` → `CsiNode::run()` raced against the stop watcher (indefinite).
 9. On exit, `esp-csi-rs`'s `reset_globals` nulls the callback/gates back to
    `Off`, so the run-time delivery registration is re-applied every `start`.
 10. Signals `DONE_SIGNAL` → main loop unlocks the CLI.
@@ -158,31 +163,34 @@ Argument syntax:
 
 ---
 
-### 2.1 `set-traffic`
+### 2.1 `set-measurement`
 
-Configure traffic generation frequency.
+Configure the node-level measurement setup (`esp_csi_rs::MeasurementSetup`).
 
-| Argument             | Type / Values | Default | Meaning                                    |
-|----------------------|---------------|---------|--------------------------------------------|
-| `--frequency-hz=<N>` | `u64` Hz      | `100`   | `0` disables traffic generation entirely.  |
+| Argument               | Type / Values | Default | Meaning                                    |
+|------------------------|---------------|---------|--------------------------------------------|
+| `--periodicity-hz=<N>` | `u16` Hz      | `100`   | Rate of the sounding traffic. `0` disables traffic generation entirely. |
 | `--unsolicited=<b>`  | `on`/`off` (shared on/off vocabulary) | `off` | Flood unsolicited ICMP echo replies instead of requests: one-directional traffic, the peer does not reply. |
 | `--type=<T>`         | registered, **unused** | — | Reserved no-op (declared in `ROOT_MENU`, ignored by the handler). |
 
 **Output** (always reprints the resulting value):
 ```
 
-Updated Traffic Configuration:
+Updated Measurement Setup:
 
-Traffic Frequency: 100Hz
+Periodicity: 100 Hz
 ICMP Flood Kind: echo requests (peer replies)
 ```
 
 **Behavior / inferences:**
-- Stored in `trigger_freq` (`u64`). At `start` it is cast to `u16`; values
-  > 65535 truncate silently.
-- Invalid (non-numeric) `--frequency-hz` prints `Invalid Frequency` and leaves
-  the value unchanged (then still prints the config block).
-- If `set-io-tasks --tx=off`, traffic is not generated regardless of frequency.
+- Stored in `periodicity_hz` (`u16`). At `start` it becomes
+  `MeasurementSetup::periodicity_hz` (omitted when `0`).
+- Invalid (non-numeric or > 65535) `--periodicity-hz` prints
+  `Invalid --periodicity-hz (use 0-65535)` and leaves the value unchanged (then
+  still prints the setup block).
+- A station's session role follows it: the initiator while `> 0`, none
+  (observer) at `0`.
+- If `set-io-tasks --tx=off`, traffic is not generated regardless of periodicity.
 
 ---
 
@@ -206,8 +214,8 @@ CSI Output: true
 - With delivery off the radio still captures CSI — RX path and timing unchanged
   — but nothing is decoded, logged, or handed to a callback. No effect on an
   emitter, which captures nothing.
-- This is the runtime delivery gate, not the collection mode. The collection
-  mode is `set-wifi --collection` (§2.5).
+- This is the runtime delivery gate, not the node's reporting. The reporting
+  is `set-wifi --reporting` (§2.5).
 - Accepts the shared on/off vocabulary (`true|false`, `on|off`, `1|0`,
   `enable[d]|disable[d]`, `yes|no`).
 - Unrecognized value prints `Invalid --enabled value. Use 'true' or 'false'.`
@@ -235,7 +243,7 @@ Pick the CSI packet output format. Calls
 - `serialized` → `LogMode::Serialized` — binary COBS-framed postcard (needs a
   host-side deserializer).
 - `esp-csi-tool` → `LogMode::EspCsiTool` — Hernandez 26-column `CSI_DATA,...` CSV
-  compatible with the ESP32-CSI-Tool collector.
+  compatible with the ESP32-CSI-Tool.
 - Unrecognized value prints
   `Invalid mode. Use 'text', 'array-list', 'serialized', or 'esp-csi-tool'.`;
   missing value prints the `Usage:` hint. Neither mutates.
@@ -314,8 +322,9 @@ WiFi / radio operating parameters.
 
 | Argument                    | Values                                                                                              | Default   |
 |-----------------------------|-----------------------------------------------------------------------------------------------------|-----------|
-| `--mode=<m>`                | `station` \| `sniffer` \| `wifi-ap` \| `ht20-emitter` \| `ht40-emitter` \| `esp-now-central` \| `esp-now-peripheral` \| `esp-now-fast-collector` (alias `esp-now-simplex-peer`) \| `esp-now-fast-source` (alias `esp-now-simplex-source`) | `sniffer` |
-| `--collection=<c>`          | `collector` \| `listener` (case-insensitive); read only by `station`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral` | `collector` |
+| `--mode=<m>`                | `station` \| `sniffer` \| `wifi-ap` \| `ht20-emitter` \| `ht40-emitter` \| `esp-now-initiator` \| `esp-now-responder` \| `esp-now-simplex-source` \| `esp-now-simplex-peer` | `sniffer` |
+| `--reporting=<r>`           | `report` \| `none` \| `threshold` \| `decimate` (case-insensitive); read only by `station`, `wifi-ap`, `esp-now-initiator`, `esp-now-responder` and `sniffer` (not `none`) | `report` |
+| `--report-to=<t>`           | `host` \| `local` (case-insensitive); destination of `report`                                     | `host`    |
 | `--sta-ssid=<SSID>`         | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | empty     |
 | `--sta-password=<PASSWORD>` | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | empty     |
 | `--ap-ssid=<SSID>`          | UTF-8, ≤ 32 bytes; quoting allowed                                                                  | `esp-csi-ap` |
@@ -335,7 +344,10 @@ WiFi / radio operating parameters.
 
 Updated WiFi Configuration:
 
-WiFi Mode: WifiSniffer
+Mode: sniffer
+Session role: none (observer) (fixed by mode)
+Sensing role: receiver (fixed by mode)
+Reporting: report (host)
 WiFi Channel: 1
 Station WiFi Settings:
 SSID: '', Password: ''
@@ -344,26 +356,30 @@ SSID: 'esp-csi-ap', Password: (open), DHCP: true, Leases: 4, Burst: false
 Peer MAC: unset (emitter broadcasts / ESP-NOW auto-pairs)
 Secondary Channel: HT20/legacy
 Emitter Period: 20000us
-Collection: collector (fixed by mode)
 ```
+(C5/C6 builds append `HE20: <bool>`.)
 
 **Behavior / inferences:**
-- Mode → `NodeMode`: `station`→`WifiStation`, `sniffer`→`WifiSniffer`,
+- Mode → `NodeMode` (`NodeMode::from_token`): `station`→`WifiStation`, `sniffer`→`WifiSniffer`,
   `wifi-ap`→`WifiAccessPoint`, `ht20-emitter`→`Ht20Emitter`,
-  `ht40-emitter`→`Ht40Emitter`, `esp-now-central`→`EspNowCentral`,
-  `esp-now-peripheral`→`EspNowPeripheral`,
-  `esp-now-fast-collector`→`EspNowFastCollector`,
-  `esp-now-fast-source`→`EspNowFastSource`. `esp-now-simplex-peer` and
-  `esp-now-simplex-source` are aliases of the two `-fast-` strings. Unknown mode
-  prints `Invalid WiFi Mode`; field unchanged.
-- The simplex ends: `EspNowFastCollector` is the peer end, a peripheral
-  collector; `EspNowFastSource` is the source end, a central listener. (Before
-  v0.8.0 they were labelled the other way round; on-air behaviour is unchanged.)
-- `--collection`: `collector` → `reporting = Always`, `listener` → `Never`,
-  `threshold` / `decimate` → the policy with the stored `set-reporting` parameters;
-  anything else prints `Invalid --collection (use collector|listener|threshold|decimate)`.
-  Modes that fix their collection mode ignore it, and the confirmation line
+  `ht40-emitter`→`Ht40Emitter`, `esp-now-initiator`→`EspNowInitiator`,
+  `esp-now-responder`→`EspNowResponder`,
+  `esp-now-simplex-source`→`EspNowSimplexSource`,
+  `esp-now-simplex-peer`→`EspNowSimplexPeer`. There are no aliases; the
+  pre-0.10 tokens are rejected. Unknown mode prints
+  `Invalid WiFi Mode '<token>' (use ...)`; field unchanged.
+- The simplex ends: `EspNowSimplexSource` is the initiator, a transmitter that
+  reports none; `EspNowSimplexPeer` is the responder, a receiver that reports.
+- `--reporting` (applied after `--mode`): `report` → `Report { to: report_to }`,
+  `none` → `None`, `threshold` / `decimate` → `ThresholdBased` / `Decimate` with
+  the stored `set-reporting` parameters; anything else prints
+  `Invalid --reporting (use report|none|threshold|decimate)`. On a sniffer `none`
+  is refused with `Invalid --reporting=none for sniffer: a sniffer that reports
+  nothing observes nothing (use report|threshold|decimate)` and the field is
+  unchanged. Modes that fix their reporting ignore it, and the confirmation line
   says `(fixed by mode)` for them.
+- `--report-to`: `host` | `local` → `report_to`; an active `report` is re-derived
+  with the new destination. Anything else prints `Invalid --report-to (use host|local)`.
 - Channel parsed as `u8`; non-numeric prints `Invalid Max Connections`
   (misnamed). Out-of-range (>14) is accepted by the parser but rejected by the
   radio at `start`. Channel flows to sniffer, AP, the emitters, and the ESP-NOW modes;
@@ -378,7 +394,7 @@ Collection: collector (fixed by mode)
 - AP auth: empty `--ap-password` → open AP (`AuthenticationMethod::None`);
   non-empty → WPA2-Personal with the given password.
 - `--peer-mac`: in the emitter modes, the destination address of injected
-  frames (unicasting to a collector usually raises that collector's CSI rate).
+  frames (unicasting to a receiver usually raises that receiver's CSI rate).
   In every ESP-NOW mode, simplex included, the explicit peer: set it on both
   nodes. An **empty** value resets to `None` (broadcast / automatic pairing). A
   malformed MAC prints `Invalid --peer-mac (use aa:bb:cc:dd:ee:ff)`.
@@ -413,13 +429,13 @@ Begin a CSI collection run.
 **Behavior:**
 - Sets `IS_COLLECTING = true` and signals `START_SIGNAL` with `Some(secs)` or
   `None`. See §1.3 for everything the collection task then does.
-- Timed run → `CSINode::run_duration(secs)`. Indefinite run → `CSINode::run()`.
+- Timed run → `CsiNode::run_duration(secs)`. Indefinite run → `CsiNode::run()`.
   In both, the registered `csi_log_and_check` callback is the sole writer of CSI
   lines (the indefinite path no longer joins a separate print loop).
 
 **Stop conditions:**
 - Pressing `q`/`Q` during a run raises `STOP_REQUEST`, forwarded to
-  `esp-csi-rs` via `CSINodeClient::send_stop()`, which unwinds `run`/
+  `esp-csi-rs` via `CsiNodeClient::send_stop()`, which unwinds `run`/
   `run_duration`. Two parallel reader paths catch the key (§1.3 / `src/main.rs:401`):
   an async `Read::read` arm and a 5 ms `Timer` arm that raw-polls the JTAG OUT-EP
   FIFO — making the stop key deterministic even under ISR starvation. The console
@@ -435,7 +451,16 @@ Begin a CSI collection run.
 
 Print the current `UserConfig`. **No arguments.**
 
-Sections: `[WiFi]`, `[Collection]`, `[CSI Config]`. The `[CSI Config]` block is
+Sections: `[Node]`, `[WiFi]`, `[Measurement]`, `[CSI Config]`. The `[Node]`
+block reads the next run's IEEE 802.11bf attributes back from the `Mode`
+`build_mode` produces (§1.3): `Session role` is `initiator` | `responder` |
+`none (observer)`, `Sensing role` is `transmitter` | `receiver` |
+`transmitter-receiver`, `Reporting` is `report (host)` | `report (local)` |
+`none` | `threshold (level=N, hold=Nms)` | `decimate N`. A value the mode does
+not let the user choose is suffixed `(fixed by mode)` (the session role is a
+choice only on the ESP-NOW pair and the station; the sensing role is always
+fixed); a sniffer with a stored `none` shows
+`report (host) (a sniffer cannot report none)`. The `[CSI Config]` block is
 target-gated (per-PPDU-format acquisition flags on C5/C6, classic fields
 elsewhere).
 
@@ -444,8 +469,14 @@ elsewhere).
 
 ====== Current Configuration ======
 
+[Node]
+  Mode: sniffer
+  Session role: none (observer) (fixed by mode)
+  Sensing role: receiver (fixed by mode)
+  Reporting: report (host)
+  Periodicity: 100 Hz
+
 [WiFi]
-  Mode    : WifiSniffer
   Channel : 1
   STA SSID: ''
   STA Pass: ''
@@ -457,12 +488,13 @@ elsewhere).
   Dst MAC : broadcast
   AP 2nd  : HT20/legacy
 
-[Collection]
-  Collection    : collector (fixed by mode)
+[Measurement]
+  Report to     : host
+  Threshold     : level=6000, hold=1000ms; Decimate n=2
+  Session ID    : <u32>
   CSI Output    : true
   CSI Peer Filt : any source
   CSI Min PHY   : any
-  Traffic Freq  : 100Hz
   PHY Rate      : RateMcs0Lgi
   Protocol      : LR
   IO Tasks      : tx=true, rx=true
@@ -502,7 +534,7 @@ Restores **every** field to its compiled-in default (§4).
 ### 2.9 `set-rate`
 
 Set the Wi-Fi PHY rate. **Reporting only, except on the ESP-NOW pair:**
-`esp-now-central` / `esp-now-peripheral` apply it as the per-peer TX PHY. Every
+`esp-now-initiator` / `esp-now-responder` apply it as the per-peer TX PHY. Every
 other mode stores it and echoes it in `show-config` — station, sniffer and
 wifi-ap take their rate from the surrounding radio configuration, an emitter
 transmits at the rate its forced TX PHY implies, and the simplex source uses its
@@ -526,7 +558,7 @@ profile's fixed rate.
 
 ### 2.10 `set-protocol`
 
-Set the Wi-Fi PHY protocol applied via `CSINode::set_protocol` at each `start`.
+Set the Wi-Fi PHY protocol applied via `CsiNode::set_protocol` at each `start`.
 
 | Argument          | Values                              | Default |
 |-------------------|-------------------------------------|---------|
@@ -561,7 +593,7 @@ Toggle per-direction TX/RX tasks via `IOTaskConfig`. Applied at `start` via
 - Both arguments optional and independent; omission leaves current value.
 - Disabling RX = pure transmitter (skips WiFi-callback CSI path).
 - Disabling TX = pure receiver (no traffic generation, regardless of
-  `set-traffic`).
+  `set-measurement`).
 - Invalid value prints `Invalid --tx value (use on|off).` (or `--rx`); field
   unchanged. The resulting `tx=…, rx=…` line is still printed.
 
@@ -584,7 +616,7 @@ Mode meanings:
   `Delivery mode: Off`.
 - `callback` → dispatch synchronously to the registered `set_csi_callback` hook.
   Output: `Delivery mode: Callback`.
-- `async` → enqueue for `CSINodeClient::next_csi_packet`. Output:
+- `async` → enqueue for `CsiNodeClient::next_csi_packet`. Output:
   `Delivery mode: Async`.
 - `raw` → set `delivery_raw = true`; registers the zero-copy `raw_csi_noop`
   fast-path on the next `start` (no packet built, no data delivered or logged,
@@ -640,7 +672,7 @@ failed counters are gone with the transport.
 Print a machine-parseable firmware identification block. **No arguments.**
 
 **Output format** (stable within a `protocol` value;
-`CLI_PROTOCOL_VERSION = 2`, `src/cli/cmds.rs:26`):
+`CLI_PROTOCOL_VERSION = 4`, `src/cli/cmds.rs`):
 ```
 ESP-CSI-CLI/<version>
 name=esp-csi-cli-rs
@@ -758,8 +790,8 @@ proprietary-only mode string and reading the rejection.
 | `--peer-mac`         | ❌            | ❌            | ❌                | ✅ (dst addr)      | ✅ (peer, simplex included) |
 | `--ht40`             | ❌            | ❌            | ✅ (AP secondary) | ❌ (use ht40-emitter) | ✅ (HT40 PHY) |
 | `set-csi-output`     | ✅            | ✅            | ✅                | ❌ (no capture)    | ✅        |
-| `--collection`       | ❌ (collector) | ✅           | ✅                | ❌ (listener)      | ✅ c/p; ❌ simplex (fixed by end) |
-| `set-rate`           | ❌ (no-op)    | ❌ (no-op)    | ❌ (no-op)        | ❌ (forced PHY)    | ✅ c/p; ❌ simplex |
+| `--reporting`        | ✅ (not `none`) | ✅          | ✅                | ❌ (none)          | ✅ i/r; ❌ simplex (fixed by end) |
+| `set-rate`           | ❌ (no-op)    | ❌ (no-op)    | ❌ (no-op)        | ❌ (forced PHY)    | ✅ i/r; ❌ simplex |
 | `set-protocol`       | ✅            | ✅            | ✅                | ❌ (forced PHY)    | ✅        |
 | `--inject-period-us/ms` | ❌         | ❌            | ❌                | ✅                 | ❌        |
 | Auth method          | n/a           | WPA2-Personal (hardcoded) | None or WPA2 from `--ap-password` | n/a | n/a |
@@ -768,7 +800,7 @@ proprietary-only mode string and reading the rejection.
 
 | Setting category                         | Applied at        | Notes |
 |------------------------------------------|-------------------|-------|
-| `set-traffic`, `set-csi-output`, `set-csi`, `set-wifi`, `set-rate`, `set-protocol`, `set-io-tasks` | Next `start` | Snapshotted from `USER_CONFIG` |
+| `set-measurement`, `set-reporting`, `set-csi-output`, `set-csi`, `set-wifi`, `set-rate`, `set-protocol`, `set-io-tasks` | Next `start` | Snapshotted from `USER_CONFIG` |
 | `set-log-mode`                           | Immediate (next packet) | Calls `set_log_mode` directly |
 | `set-csi-delivery --mode=off/callback/async`, `--logging` | Immediate (but re-overridden at next `start`) | Calls esp-csi-rs setters directly |
 | `set-csi-delivery --mode=raw`            | Next `start`      | Stored in `delivery_raw` |
@@ -798,10 +830,11 @@ proprietary-only mode string and reading the rejection.
 |-------------------|----------------------------------|
 | `node_mode`       | `WifiSniffer`                    |
 | `csi_output_enabled` | `true`                        |
-| `reporting`       | `Always` (collector)             |
+| `reporting`       | `Report { to: Host }`            |
+| `report_to`       | `Host`                           |
 | `csi_peer_filter` | `None` (any source)              |
 | `csi_min_sig_mode` | `0` (any PHY)                   |
-| `trigger_freq`    | `100` Hz                         |
+| `periodicity_hz`  | `100` Hz                         |
 | `flood_unsolicited` | `false`                        |
 | `sta_ssid`        | empty                            |
 | `sta_password`    | empty                            |
@@ -863,11 +896,12 @@ Backspace correctly retracts quote state via `recompute_quote_state`.
 
 | Command               | Purpose                              | Apply timing | Build gating  |
 |-----------------------|--------------------------------------|--------------|---------------|
-| `set-traffic`         | Traffic-gen frequency                | Next `start` | always        |
+| `set-measurement`     | Measurement periodicity (Hz)         | Next `start` | always        |
+| `set-reporting`       | Reporting (`report\|none\|threshold\|decimate`, `--report-to=host\|local`) + threshold/decimate parameters | Next `start` | always |
 | `set-csi-output`      | Deliver captured CSI or not          | Next `start` | always        |
 | `set-log-mode`        | Output format                        | Immediate    | always        |
 | `set-csi`             | CSI feature flags (variant per chip) | Next `start` | classic / C5-C6 |
-| `set-wifi`            | Mode / collection / SSID / pass / AP / channel / peer / emitter period | Next `start` | always |
+| `set-wifi`            | Mode / reporting / SSID / pass / AP / channel / peer / emitter period | Next `start` | always |
 | `set-protocol`        | Wi-Fi PHY protocol                   | Next `start` | always        |
 | `start`               | Begin collection (timed/indefinite)  | —            | always        |
 | `show-config`         | Print current config                 | —            | always        |
@@ -920,7 +954,11 @@ For on-demand identification, invoke `info` (§2.13) — same magic prefix plus 
   (`key=value` lines up to the `END-INFO` sentinel) is stable within a
   `protocol` value. Adding keys does **not** bump it (`log=`, `transport=` and
   `baud=` were added at `protocol = 2`), so host parsers must ignore unknown
-  keys; removing or changing a key does.
+  keys; removing or changing a key does. `protocol = 3` marked the esp-csi-rs
+  0.12 `wire` format; `protocol = 4` marks the IEEE 802.11bf command
+  vocabulary (`--reporting`, `set-reporting --policy=report|none|...`,
+  `set-measurement --periodicity-hz`, initiator/responder mode tokens) with the
+  serialized format unchanged.
 - `features` is informational; presence of `statistics` tells the host whether
   `show-stats` exists. Treat the list as an unordered set.
 - `mac` (added in `protocol = 2`) is the stable device key. Host tooling pins
