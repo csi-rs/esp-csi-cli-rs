@@ -162,6 +162,9 @@ runner = "espflash flash --monitor"
 [env]
 # Default log level for ESP-IDF logging output.
 ESP_LOG = "INFO"
+# Run on every ESP32 silicon revision. esp-hal defaults the classic ESP32's minimum to v3.0 and
+# panics before clock init on older parts, and v1.0 boards are still common. Other chips default to 0.
+ESP_HAL_CONFIG_MIN_CHIP_REVISION = "0"
 # Uncomment the following line if you want to use defmt
 # DEFMT_LOG = "INFO"
 

@@ -458,6 +458,15 @@ pub(crate) fn build_mode(user_config: &UserConfig) -> Mode {
 /// output before the reset wipes it.
 #[unsafe(no_mangle)]
 fn custom_halt() -> ! {
+    // A panic that fires before clock init (esp-hal's chip-revision check is one) leaves the RTC
+    // slow-clock calibration at 0, so `rwdt_full_system_reset` divides by zero, panics, and lands
+    // back here. Without this guard that loop never ends and the board never resets. A plain
+    // load/store, not a swap: riscv32imc (ESP32-C3) has no atomic read-modify-write.
+    static HALTING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if HALTING.load(Ordering::Relaxed) {
+        esp_hal::system::software_reset();
+    }
+    HALTING.store(true, Ordering::Relaxed);
     for _ in 0..100_000_000u32 {
         core::hint::spin_loop();
     }
