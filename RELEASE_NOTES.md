@@ -1,5 +1,17 @@
 # Release Notes
 
+## v0.10.1
+
+### Classic ESP32 boards of every silicon revision boot
+
+- esp-hal requires ESP32 silicon v3.0 or later by default and panics on older parts before clock
+  init. v1.0 boards are still common, and one flashed "successfully" but never answered. The
+  build now sets `ESP_HAL_CONFIG_MIN_CHIP_REVISION = "0"`. Verified on an ESP32-D0WDQ6 rev v1.0
+  behind a CH340: it boots, answers `info` (protocol 4), and captures and transmits CSI.
+- A panic that fires before clock init no longer wedges the board. The reset path divided by a
+  zero clock calibration, panicked, and re-entered the halt handler forever; a second entry now
+  falls back to a software reset.
+
 ## v0.10.0
 
 Highlights: the CLI moves to **esp-csi-rs 0.13** and the **IEEE 802.11bf vocabulary**. Where
